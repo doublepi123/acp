@@ -115,9 +115,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, anthropicReq *types.Ant
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Anthropic error: %s", string(respBody))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		writeAnthropicError(w, resp.StatusCode, respBody)
 		return
 	}
 
@@ -163,9 +161,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		log.Printf("Anthropic error: %s", string(respBody))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		writeAnthropicError(w, resp.StatusCode, respBody)
 		return
 	}
 
@@ -173,6 +169,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
 	flusher, ok := w.(http.Flusher)
@@ -185,6 +182,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	msgID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
+	blockTypes := make(map[int]string)
+	blockNames := make(map[int]string)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -199,7 +198,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 			continue
 		}
 
-		sseEvent := convertStreamEvent(&event, model, msgID)
+		sseEvent := convertStreamEvent(&event, model, msgID, blockTypes, blockNames)
 		if sseEvent == "" {
 			continue
 		}
@@ -216,7 +215,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	flusher.Flush()
 }
 
-func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string) string {
+func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string, blockTypes map[int]string, blockNames map[int]string) string {
 	switch event.Type {
 	case "message_start":
 		resp := map[string]any{
@@ -234,16 +233,20 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string) 
 		return string(b)
 
 	case "content_block_start":
-		if event.ContentBlock == nil {
+		if event.ContentBlock == nil || event.Index == nil {
 			return ""
 		}
+		idx := *event.Index
+		blockTypes[idx] = event.ContentBlock.Type
+		blockNames[idx] = event.ContentBlock.Name
+
 		switch event.ContentBlock.Type {
 		case "text":
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"output_index": event.Index,
 				"item": map[string]any{
-					"id":      fmt.Sprintf("%s_msg_%d", msgID, *event.Index),
+					"id":      fmt.Sprintf("%s_msg_%d", msgID, idx),
 					"type":    "message",
 					"role":    "assistant",
 					"status":  "in_progress",
@@ -257,7 +260,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string) 
 				"type":         "response.output_item.added",
 				"output_index": event.Index,
 				"item": map[string]any{
-					"id":      fmt.Sprintf("%s_call_%d", msgID, *event.Index),
+					"id":      fmt.Sprintf("%s_call_%d", msgID, idx),
 					"type":    "function_call",
 					"name":    event.ContentBlock.Name,
 					"call_id": event.ContentBlock.ID,
@@ -266,6 +269,23 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string) 
 			}
 			b, _ := json.Marshal(resp)
 			return string(b)
+		case "server_tool_use":
+			resp := map[string]any{
+				"type":         "response.output_item.added",
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":      fmt.Sprintf("%s_call_%d", msgID, idx),
+					"type":    "function_call",
+					"name":    event.ContentBlock.Name,
+					"call_id": event.ContentBlock.ID,
+					"status":  "in_progress",
+				},
+			}
+			b, _ := json.Marshal(resp)
+			return string(b)
+		case "web_search_results":
+			// Web search results block - no client-side item needed
+			return ""
 		}
 
 	case "content_block_delta":
@@ -293,12 +313,31 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string) 
 		}
 
 	case "content_block_stop":
+		if event.Index == nil {
+			return ""
+		}
+		idx := *event.Index
+		item := map[string]any{
+			"id":     fmt.Sprintf("%s_%s_%d", msgID, blockTypes[idx], idx),
+			"status": "completed",
+		}
+		switch blockTypes[idx] {
+		case "text":
+			item["type"] = "message"
+			item["role"] = "assistant"
+		case "tool_use":
+			item["type"] = "function_call"
+			item["name"] = blockNames[idx]
+		case "server_tool_use":
+			item["type"] = "function_call"
+			item["name"] = blockNames[idx]
+		case "web_search_results":
+			return ""
+		}
 		resp := map[string]any{
 			"type":         "response.output_item.done",
 			"output_index": event.Index,
-			"item": map[string]any{
-				"status": "completed",
-			},
+			"item":         item,
 		}
 		b, _ := json.Marshal(resp)
 		return string(b)
@@ -341,6 +380,21 @@ func writeError(w http.ResponseWriter, status int, message string) {
 			Message: message,
 		},
 	})
+}
+
+func writeAnthropicError(w http.ResponseWriter, status int, body []byte) {
+	var errResp struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error.Message != "" {
+		writeError(w, status, errResp.Error.Message)
+		return
+	}
+	writeError(w, status, string(body))
 }
 
 // HandleHealth handles health check.

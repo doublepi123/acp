@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/tar"
+	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -97,7 +99,17 @@ func upgrade(opts upgradeOptions) error {
 		return fmt.Errorf("downloading release: HTTP %d", resp.StatusCode)
 	}
 
-	newBinary, err := extractBinary(resp.Body, opts.Command)
+	binaryName := opts.Command
+	if opts.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading release body: %w", err)
+	}
+
+	newBinary, err := extractBinary(bytes.NewReader(bodyBytes), int64(len(bodyBytes)), binaryName, opts.GOOS)
 	if err != nil {
 		return err
 	}
@@ -119,12 +131,16 @@ func releaseAssetName(project, goos, goarch string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s-%s-%s.tar.gz", project, osPart, archPart), nil
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
+	}
+	return fmt.Sprintf("%s-%s-%s.%s", project, osPart, archPart, ext), nil
 }
 
 func releaseOS(goos string) (string, error) {
 	switch goos {
-	case "darwin", "linux":
+	case "darwin", "linux", "windows":
 		return goos, nil
 	default:
 		return "", fmt.Errorf("unsupported OS: %s", goos)
@@ -151,7 +167,14 @@ func releaseDownloadURL(baseURL, repo, tag, asset string) string {
 	return fmt.Sprintf("%s/%s/releases/download/%s/%s", baseURL, repo, tag, asset)
 }
 
-func extractBinary(r io.Reader, command string) ([]byte, error) {
+func extractBinary(r io.ReaderAt, size int64, command string, goos string) ([]byte, error) {
+	if goos == "windows" {
+		return extractBinaryZip(r, size, command)
+	}
+	return extractBinaryTarGz(io.NewSectionReader(r, 0, size), command)
+}
+
+func extractBinaryTarGz(r io.Reader, command string) ([]byte, error) {
 	gzr, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("reading release archive: %w", err)
@@ -175,6 +198,35 @@ func extractBinary(r io.Reader, command string) ([]byte, error) {
 		}
 
 		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s from release archive: %w", command, err)
+		}
+		return data, nil
+	}
+
+	return nil, fmt.Errorf("release archive did not contain %s", command)
+}
+
+func extractBinaryZip(r io.ReaderAt, size int64, command string) ([]byte, error) {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return nil, fmt.Errorf("reading release archive: %w", err)
+	}
+
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if filepath.Base(f.Name) != command {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("opening %s in archive: %w", command, err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
 		if err != nil {
 			return nil, fmt.Errorf("reading %s from release archive: %w", command, err)
 		}

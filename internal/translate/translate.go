@@ -31,11 +31,16 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 	if len(openaiReq.Tools) > 0 {
 		anthropicReq.Tools = make([]types.AnthropicTool, 0, len(openaiReq.Tools))
 		for _, t := range openaiReq.Tools {
-			if t.Type == "function" || t.Type == "" {
+			switch t.Type {
+			case "function", "":
 				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
 					Name:        t.Name,
 					Description: t.Description,
 					InputSchema: t.Parameters,
+				})
+			case "web_search":
+				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
+					Type: "web_search_20250305",
 				})
 			}
 		}
@@ -145,8 +150,8 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 			Content: []types.AnthropicContentBlock{
 				{
 					Type:      "tool_result",
-					ID:        msg.CallID,
-					Input:     content,
+					ToolUseID: msg.CallID,
+					Content:   content,
 				},
 			},
 		}
@@ -239,12 +244,32 @@ func contentToString(content any) string {
 	}
 }
 
+func extractWebSearchResults(block types.AnthropicContentBlock) []map[string]any {
+	if block.WebSearchResults == nil {
+		return nil
+	}
+
+	var annotations []map[string]any
+	for _, r := range block.WebSearchResults.SearchResults {
+		if r.URL == "" {
+			continue
+		}
+		annotations = append(annotations, map[string]any{
+			"type":  "url_citation",
+			"url":   r.URL,
+			"title": r.Title,
+		})
+	}
+	return annotations
+}
+
 // ToOpenAIResponse converts an Anthropic response to an OpenAI Response API response.
 func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string) *types.OpenAIResponse {
 	output := make([]types.OutputItem, 0)
 
 	textContent := ""
 	toolCalls := make([]types.OutputItem, 0)
+	var annotations []map[string]any
 
 	for i, block := range anthropicResp.Content {
 		switch block.Type {
@@ -260,16 +285,28 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 				Arguments: string(args),
 				CallID:    block.ID,
 			})
+		case "server_tool_use":
+			// Server-side tools like web search - no client action needed
+		case "web_search_results":
+			results := extractWebSearchResults(block)
+			annotations = append(annotations, results...)
 		}
 	}
 
 	if textContent != "" {
+		contentItem := map[string]any{
+			"type": "output_text",
+			"text": textContent,
+		}
+		if len(annotations) > 0 {
+			contentItem["annotations"] = annotations
+		}
 		output = append(output, types.OutputItem{
 			ID:      fmt.Sprintf("msg_%s", anthropicResp.ID),
 			Type:    "message",
 			Status:  "completed",
 			Role:    "assistant",
-			Content: []map[string]string{{"type": "output_text", "text": textContent}},
+			Content: []map[string]any{contentItem},
 		})
 	}
 

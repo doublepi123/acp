@@ -24,12 +24,20 @@ type AnthropicMessage struct {
 
 // AnthropicContentBlock represents a content block.
 type AnthropicContentBlock struct {
-	Type   string `json:"type"`
-	Text   string `json:"text,omitempty"`
-	Source *AnthropicSource `json:"source,omitempty"`
-	ID     string `json:"id,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Input  any    `json:"input,omitempty"`
+	Type             string               `json:"type"`
+	Text             string               `json:"text,omitempty"`
+	Source           *AnthropicSource     `json:"source,omitempty"`
+	ID               string               `json:"id,omitempty"`
+	Name             string               `json:"name,omitempty"`
+	Input            any                  `json:"input,omitempty"`
+	Content          any                  `json:"content,omitempty"`
+	ToolUseID        string               `json:"tool_use_id,omitempty"`
+	WebSearchResults *AnthropicWebSearchResults `json:"web_search_results,omitempty"`
+}
+
+// AnthropicWebSearchResults holds web search results from Anthropic.
+type AnthropicWebSearchResults struct {
+	SearchResults []AnthropicWebSearchResult `json:"search_results"`
 }
 
 // AnthropicSource represents an image source.
@@ -41,9 +49,11 @@ type AnthropicSource struct {
 
 // AnthropicTool represents a tool definition for Anthropic.
 type AnthropicTool struct {
-	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
-	InputSchema any    `json:"input_schema"`
+	InputSchema any    `json:"input_schema,omitempty"`
+	MaxUses     *int   `json:"max_uses,omitempty"`
 }
 
 // AnthropicMessageResponse represents an Anthropic Messages API response.
@@ -86,4 +96,12 @@ type AnthropicDelta struct {
 type AnthropicError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+}
+
+// AnthropicWebSearchResult represents a single web search result from Anthropic.
+type AnthropicWebSearchResult struct {
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	PageAge  string `json:"page_age,omitempty"`
 }

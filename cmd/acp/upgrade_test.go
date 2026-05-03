@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"testing"
@@ -16,6 +17,7 @@ func TestReleaseAssetName(t *testing.T) {
 	}{
 		{name: "linux amd64", goos: "linux", goarch: "amd64", want: "acp-linux-amd64.tar.gz"},
 		{name: "darwin arm64", goos: "darwin", goarch: "arm64", want: "acp-darwin-arm64.tar.gz"},
+		{name: "windows amd64", goos: "windows", goarch: "amd64", want: "acp-windows-amd64.zip"},
 	}
 
 	for _, tt := range tests {
@@ -65,7 +67,7 @@ func TestExtractBinary(t *testing.T) {
 		"acp":       "binary-data",
 	})
 
-	got, err := extractBinary(bytes.NewReader(archive), "acp")
+	got, err := extractBinary(bytes.NewReader(archive), int64(len(archive)), "acp", "linux")
 	if err != nil {
 		t.Fatalf("extractBinary() error = %v", err)
 	}
@@ -77,8 +79,23 @@ func TestExtractBinary(t *testing.T) {
 func TestExtractBinaryMissing(t *testing.T) {
 	archive := testTarGz(t, map[string]string{"README.md": "ignore"})
 
-	if _, err := extractBinary(bytes.NewReader(archive), "acp"); err == nil {
+	if _, err := extractBinary(bytes.NewReader(archive), int64(len(archive)), "acp", "linux"); err == nil {
 		t.Fatal("extractBinary() error = nil, want error")
+	}
+}
+
+func TestExtractBinaryZip(t *testing.T) {
+	archive := testZip(t, map[string]string{
+		"README.md": "ignore",
+		"acp.exe":   "binary-data",
+	})
+
+	got, err := extractBinary(bytes.NewReader(archive), int64(len(archive)), "acp.exe", "windows")
+	if err != nil {
+		t.Fatalf("extractBinary() error = %v", err)
+	}
+	if string(got) != "binary-data" {
+		t.Fatalf("extractBinary() = %q, want %q", string(got), "binary-data")
 	}
 }
 
@@ -107,6 +124,29 @@ func testTarGz(t *testing.T, files map[string]string) []byte {
 	}
 	if err := gzw.Close(); err != nil {
 		t.Fatalf("gzip Close() error = %v", err)
+	}
+
+	return buf.Bytes()
+}
+
+func testZip(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	for name, body := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatalf("Write() error = %v", err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip Close() error = %v", err)
 	}
 
 	return buf.Bytes()

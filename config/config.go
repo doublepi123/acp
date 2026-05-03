@@ -67,7 +67,9 @@ func loadClaudeSettings() *ClaudeSettings {
 	path := filepath.Join(home, ".claude", "settings.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("No claude settings at %s: %v", path, err)
+		if !os.IsNotExist(err) {
+			log.Printf("Failed to read claude settings at %s: %v", path, err)
+		}
 		return nil
 	}
 
