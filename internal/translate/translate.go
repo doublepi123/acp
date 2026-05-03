@@ -33,14 +33,36 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 		for _, t := range openaiReq.Tools {
 			switch t.Type {
 			case "function", "":
+				name := t.Name
+				description := t.Description
+				parameters := t.Parameters
+				if t.Function != nil {
+					if name == "" {
+						name = t.Function.Name
+					}
+					if description == "" {
+						description = t.Function.Description
+					}
+					if parameters == nil {
+						parameters = t.Function.Parameters
+					}
+				}
+				if name == "" {
+					return nil, fmt.Errorf("function tool missing name")
+				}
 				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Name:        t.Name,
-					Description: t.Description,
-					InputSchema: t.Parameters,
+					Name:        name,
+					Description: description,
+					InputSchema: parameters,
 				})
-			case "web_search":
+			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Type: "web_search_20250305",
+					Type:           "web_search_20250305",
+					Name:           "web_search",
+					MaxUses:        t.MaxUses,
+					AllowedDomains: t.AllowedDomains,
+					BlockedDomains: t.BlockedDomains,
+					UserLocation:   t.UserLocation,
 				})
 			}
 		}

@@ -2,17 +2,17 @@ package types
 
 // OpenAIResponseRequest represents an OpenAI Response API request.
 type OpenAIResponseRequest struct {
-	Model        string         `json:"model"`
-	Input        any            `json:"input"`
-	Instructions string         `json:"instructions,omitempty"`
-	MaxTokens    int            `json:"max_output_tokens,omitempty"`
-	Temperature  *float64       `json:"temperature,omitempty"`
-	TopP         *float64       `json:"top_p,omitempty"`
-	Stream       bool           `json:"stream,omitempty"`
-	Tools        []Tool         `json:"tools,omitempty"`
-	ToolChoice   any            `json:"tool_choice,omitempty"`
-	ParallelCalls *bool         `json:"parallel_tool_calls,omitempty"`
-	Metadata     map[string]any `json:"metadata,omitempty"`
+	Model         string         `json:"model"`
+	Input         any            `json:"input"`
+	Instructions  string         `json:"instructions,omitempty"`
+	MaxTokens     int            `json:"max_output_tokens,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	TopP          *float64       `json:"top_p,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	Tools         []Tool         `json:"tools,omitempty"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
+	ParallelCalls *bool          `json:"parallel_tool_calls,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // InputMessage represents a message in the input field when it's an array.
@@ -26,7 +26,20 @@ type InputMessage struct {
 
 // Tool represents a tool definition.
 type Tool struct {
-	Type        string `json:"type"`
+	Type              string        `json:"type"`
+	Name              string        `json:"name,omitempty"`
+	Description       string        `json:"description,omitempty"`
+	Parameters        any           `json:"parameters,omitempty"`
+	Function          *FunctionTool `json:"function,omitempty"`
+	MaxUses           *int          `json:"max_uses,omitempty"`
+	AllowedDomains    []string      `json:"allowed_domains,omitempty"`
+	BlockedDomains    []string      `json:"blocked_domains,omitempty"`
+	UserLocation      any           `json:"user_location,omitempty"`
+	SearchContextSize string        `json:"search_context_size,omitempty"`
+}
+
+// FunctionTool represents Chat Completions-style nested function tool details.
+type FunctionTool struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 	Parameters  any    `json:"parameters,omitempty"`
@@ -42,14 +55,14 @@ type ToolCall struct {
 
 // OpenAIResponse represents the OpenAI Response API response.
 type OpenAIResponse struct {
-	ID        string       `json:"id"`
-	Object    string       `json:"object"`
-	CreatedAt int64        `json:"created_at"`
-	Status    string       `json:"status"`
-	Model     string       `json:"model"`
-	Output    []OutputItem `json:"output"`
-	Usage     *Usage       `json:"usage,omitempty"`
-	Error     *APIError    `json:"error,omitempty"`
+	ID        string         `json:"id"`
+	Object    string         `json:"object"`
+	CreatedAt int64          `json:"created_at"`
+	Status    string         `json:"status"`
+	Model     string         `json:"model"`
+	Output    []OutputItem   `json:"output"`
+	Usage     *Usage         `json:"usage,omitempty"`
+	Error     *APIError      `json:"error,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
