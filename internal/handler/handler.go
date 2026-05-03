@@ -17,10 +17,10 @@ import (
 
 // Handler handles HTTP requests, proxying OpenAI Response API to Anthropic.
 type Handler struct {
-	AnthropicURL   string
-	AnthropicKey   string
-	DefaultModel   string
-	HTTPClient     *http.Client
+	AnthropicURL string
+	AnthropicKey string
+	DefaultModel string
+	HTTPClient   *http.Client
 }
 
 // New creates a new Handler.
@@ -55,10 +55,7 @@ func (h *Handler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Override model with Claude default if set
-	if h.DefaultModel != "" {
-		openaiReq.Model = h.DefaultModel
-	}
+	openaiReq.Model = h.resolveModel(openaiReq.Model)
 
 	log.Printf("Received request: model=%s stream=%v", openaiReq.Model, openaiReq.Stream)
 
@@ -73,6 +70,16 @@ func (h *Handler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	} else {
 		h.handleNonStream(w, anthropicReq, openaiReq.Model)
 	}
+}
+
+func (h *Handler) resolveModel(model string) string {
+	if h.DefaultModel == "" {
+		return model
+	}
+	if model == "" || model == "codex-auto-review" {
+		return h.DefaultModel
+	}
+	return model
 }
 
 func (h *Handler) handleNonStream(w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {

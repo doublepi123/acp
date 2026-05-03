@@ -35,6 +35,9 @@ acp codex
 # 传递 codex 参数
 acp codex "帮我写一个..."
 
+# 升级到最新 release
+acp upgrade
+
 # 仅启动代理服务
 acp serve
 ```
@@ -43,8 +46,21 @@ acp serve
 
 1. 在随机空闲端口启动代理
 2. 轮询 `/health` 确认就绪
-3. 以 `OPENAI_BASE_URL` 指向代理的配置拉起 `codex`
-4. Codex 退出后自动关闭代理
+3. 注入临时 Codex `model_provider`，指向本地代理的 OpenAI Responses API
+4. 使用隔离的临时 `CODEX_HOME`，避免 Codex 读取或修改你的 ChatGPT 登录态
+5. Codex 退出后自动关闭代理
+
+`acp codex` 会默认把 Codex 模型设置为当前 `ANTHROPIC_MODEL`。如果 Codex 内部请求
+`codex-auto-review`，代理会自动改用当前默认模型转发。
+
+## 升级
+
+```bash
+acp upgrade
+```
+
+`acp upgrade` 会按当前系统架构下载 GitHub release 中的 `acp-<os>-<arch>.tar.gz`，
+并替换当前正在运行的 `acp` 二进制。可通过 `REPO`, `GITHUB_BASE_URL`, `TAG` 覆盖下载来源。
 
 ## 配置来源（优先级从高到低）
 

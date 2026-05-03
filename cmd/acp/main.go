@@ -23,6 +23,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  serve         Start the proxy server\n")
 		fmt.Fprintf(os.Stderr, "  codex [args]  Start proxy and launch Codex with proper config\n")
+		fmt.Fprintf(os.Stderr, "  upgrade       Upgrade acp from the latest release\n")
 		os.Exit(1)
 	}
 
@@ -31,6 +32,8 @@ func main() {
 		runServe()
 	case "codex":
 		runCodex()
+	case "upgrade":
+		runUpgrade()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		os.Exit(1)
@@ -88,8 +91,14 @@ func runCodex() {
 		log.Fatal("proxy failed to start in time")
 	}
 
-	// Build Codex command with environment
-	codexArgs := codexArgsWithModel(os.Args[2:], cfg.DefaultModel)
+	codexHome, cleanupCodexHome, err := prepareIsolatedCodexHome()
+	if err != nil {
+		log.Fatalf("failed to prepare Codex home: %v", err)
+	}
+	defer cleanupCodexHome()
+
+	// Build Codex command with a temporary provider that points at this proxy.
+	codexArgs := codexArgsWithProxy(os.Args[2:], cfg.DefaultModel, port)
 	cmd := exec.Command("codex", codexArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -97,6 +106,7 @@ func runCodex() {
 
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env,
+		fmt.Sprintf("CODEX_HOME=%s", codexHome),
 		fmt.Sprintf("OPENAI_BASE_URL=http://localhost:%d/v1", port),
 		"OPENAI_API_KEY=acp-proxy",
 	)
@@ -136,15 +146,30 @@ func runCodex() {
 	log.Printf("acp proxy stopped")
 }
 
-func codexArgsWithModel(args []string, model string) []string {
+func codexArgsWithProxy(args []string, model string, port int) []string {
+	out := make([]string, 0, len(args)+12)
+	out = append(out, codexProxyConfigArgs(port)...)
+
 	if model == "" || hasCodexModelArg(args) {
-		return args
+		out = append(out, args...)
+		return out
 	}
 
-	out := make([]string, 0, len(args)+2)
 	out = append(out, "--model", model)
 	out = append(out, args...)
 	return out
+}
+
+func codexProxyConfigArgs(port int) []string {
+	baseURL := fmt.Sprintf("http://localhost:%d/v1", port)
+	return []string{
+		"-c", `model_provider="acp"`,
+		"-c", `model_providers.acp.name="ACP"`,
+		"-c", fmt.Sprintf(`model_providers.acp.base_url="%s"`, baseURL),
+		"-c", `model_providers.acp.env_key="OPENAI_API_KEY"`,
+		"-c", `model_providers.acp.wire_api="responses"`,
+		"-c", `forced_login_method="api"`,
+	}
 }
 
 func hasCodexModelArg(args []string) bool {
