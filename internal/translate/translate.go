@@ -74,6 +74,16 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 					Description: customToolDescription(t.Description, t.Format),
 					InputSchema: customToolInputSchema(),
 				})
+			case "apply_patch":
+				if anthropicReq.ApplyPatchTools == nil {
+					anthropicReq.ApplyPatchTools = make(map[string]bool)
+				}
+				anthropicReq.ApplyPatchTools["apply_patch"] = true
+				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
+					Name:        "apply_patch",
+					Description: applyPatchToolDescription(),
+					InputSchema: applyPatchToolInputSchema(),
+				})
 			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 				allowedDomains := t.AllowedDomains
 				blockedDomains := t.BlockedDomains
@@ -173,6 +183,39 @@ func customToolInputSchema() map[string]any {
 	}
 }
 
+func applyPatchToolDescription() string {
+	return "Apply exactly one structured file patch operation. Use create_file to create a file, update_file to modify a file, or delete_file to remove a file. For create_file and update_file, provide a V4A diff in operation.diff."
+}
+
+func applyPatchToolInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"operation": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type": map[string]any{
+						"type": "string",
+						"enum": []string{"create_file", "update_file", "delete_file"},
+					},
+					"path": map[string]any{
+						"type":        "string",
+						"description": "Repository-relative path to create, update, or delete.",
+					},
+					"diff": map[string]any{
+						"type":        "string",
+						"description": "V4A diff for create_file or update_file operations.",
+					},
+				},
+				"required":             []string{"type", "path"},
+				"additionalProperties": false,
+			},
+		},
+		"required":             []string{"operation"},
+		"additionalProperties": false,
+	}
+}
+
 func isForcedToolChoice(tc any) bool {
 	switch v := tc.(type) {
 	case map[string]string:
@@ -200,7 +243,10 @@ func convertToolChoice(tc any) any {
 	case map[string]any:
 		if t, ok := v["type"]; ok {
 			switch t {
-			case "function", "custom":
+			case "function", "custom", "apply_patch":
+				if t == "apply_patch" {
+					return map[string]any{"type": "tool", "name": "apply_patch"}
+				}
 				if name, ok := v["name"].(string); ok {
 					return map[string]any{"type": "tool", "name": name}
 				}
@@ -292,6 +338,10 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 	case "custom_tool_call":
 		return convertCustomToolCallMessage(msg)
 	case "custom_tool_call_output":
+		return convertFunctionCallOutputMessage(msg)
+	case "apply_patch_call":
+		return convertApplyPatchCallMessage(msg)
+	case "apply_patch_call_output":
 		return convertFunctionCallOutputMessage(msg)
 	case "reasoning":
 		return convertReasoningMessage(msg)
@@ -484,6 +534,37 @@ func convertCustomToolCallMessage(msg types.InputMessage) *types.AnthropicMessag
 				ID:    callID,
 				Name:  msg.Name,
 				Input: map[string]any{"input": input},
+			},
+		},
+	}
+}
+
+func convertApplyPatchCallMessage(msg types.InputMessage) *types.AnthropicMessage {
+	callID := msg.CallID
+	if callID == "" {
+		callID = msg.ID
+	}
+	if callID == "" {
+		return nil
+	}
+
+	input := map[string]any{"operation": applyPatchOperation(msg.Operation)}
+	if msg.Operation == nil {
+		if msg.Input != "" {
+			input["operation"] = parseJSONOrString(msg.Input)
+		} else if msg.Arguments != "" {
+			input["operation"] = parseJSONOrString(msg.Arguments)
+		}
+	}
+
+	return &types.AnthropicMessage{
+		Role: "assistant",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type:  "tool_use",
+				ID:    callID,
+				Name:  "apply_patch",
+				Input: input,
 			},
 		},
 	}
@@ -794,6 +875,13 @@ func customToolSet(customToolNames ...map[string]bool) map[string]bool {
 	return customToolNames[0]
 }
 
+func applyPatchToolSet(toolNames ...map[string]bool) map[string]bool {
+	if len(toolNames) < 2 || toolNames[1] == nil {
+		return map[string]bool{}
+	}
+	return toolNames[1]
+}
+
 func customToolInput(input any) string {
 	switch v := input.(type) {
 	case string:
@@ -808,6 +896,25 @@ func customToolInput(input any) string {
 		}
 	}
 	return stringifyToolInput(input)
+}
+
+func applyPatchOperation(input any) any {
+	switch v := input.(type) {
+	case nil:
+		return map[string]any{}
+	case string:
+		return parseJSONOrString(v)
+	case map[string]any:
+		if op, ok := v["operation"]; ok {
+			return op
+		}
+		if _, hasType := v["type"]; hasType {
+			if _, hasPath := v["path"]; hasPath {
+				return v
+			}
+		}
+	}
+	return input
 }
 
 func stringifyToolInput(input any) string {
@@ -829,6 +936,7 @@ func stringifyToolInput(input any) string {
 func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string, customToolNames ...map[string]bool) *types.OpenAIResponse {
 	output := make([]types.OutputItem, 0)
 	customTools := customToolSet(customToolNames...)
+	applyPatchTools := applyPatchToolSet(customToolNames...)
 
 	textContent := ""
 	webSearchCalls := make([]types.OutputItem, 0)
@@ -845,7 +953,15 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 			textContent += block.Text
 			annotations = append(annotations, blockCitations(block, startIndex)...)
 		case "tool_use":
-			if customTools[block.Name] {
+			if applyPatchTools[block.Name] {
+				functionCalls = append(functionCalls, types.OutputItem{
+					ID:        fmt.Sprintf("%s_call_%d", anthropicResp.ID, i),
+					Type:      "apply_patch_call",
+					Status:    "completed",
+					CallID:    block.ID,
+					Operation: applyPatchOperation(block.Input),
+				})
+			} else if customTools[block.Name] {
 				functionCalls = append(functionCalls, types.OutputItem{
 					ID:     fmt.Sprintf("%s_call_%d", anthropicResp.ID, i),
 					Type:   "custom_tool_call",

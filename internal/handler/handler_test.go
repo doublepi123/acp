@@ -1,11 +1,84 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/doublepi123/acp/internal/types"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestHandleResponsesConvertsApplyPatchToolCall(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req types.AnthropicMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode upstream request: %v", err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].Name != "apply_patch" {
+			t.Fatalf("upstream tools = %#v, want apply_patch tool", req.Tools)
+		}
+		var body bytes.Buffer
+		json.NewEncoder(&body).Encode(types.AnthropicMessageResponse{
+			ID:   "msg_1",
+			Type: "message",
+			Role: "assistant",
+			Content: []types.AnthropicContentBlock{
+				{
+					Type: "tool_use",
+					ID:   "call_1",
+					Name: "apply_patch",
+					Input: map[string]any{
+						"operation": map[string]any{
+							"type": "delete_file",
+							"path": "old.txt",
+						},
+					},
+				},
+			},
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body.String())),
+		}, nil
+	})}
+
+	body := []byte(`{"model":"claude-test","input":"edit","tools":[{"type":"apply_patch"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	h.HandleResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp types.OpenAIResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode response: %v", err)
+	}
+	if len(resp.Output) != 1 {
+		t.Fatalf("len(Output) = %d, want 1", len(resp.Output))
+	}
+	item := resp.Output[0]
+	if item.Type != "apply_patch_call" || item.CallID != "call_1" {
+		t.Fatalf("output item = %#v, want apply_patch_call", item)
+	}
+	op, ok := item.Operation.(map[string]any)
+	if !ok || op["type"] != "delete_file" || op["path"] != "old.txt" {
+		t.Fatalf("operation = %#v, want delete_file old.txt", item.Operation)
+	}
+}
 
 func TestConvertStreamEventUsesStableResponseAndItemIDs(t *testing.T) {
 	state := newStreamState()
@@ -179,6 +252,60 @@ func TestConvertStreamEventMapsCustomToolCall(t *testing.T) {
 	doneItem := decodeEvent(t, events[1])["item"].(map[string]any)
 	if doneItem["type"] != "custom_tool_call" || doneItem["input"] != "patch text" {
 		t.Fatalf("done item = %#v, want completed custom_tool_call", doneItem)
+	}
+}
+
+func TestConvertStreamEventMapsApplyPatchCall(t *testing.T) {
+	state := newStreamState(nil, map[string]bool{"apply_patch": true})
+	idx := 1
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	added := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "tool_use",
+			ID:   "call_1",
+			Name: "apply_patch",
+		},
+	}, "claude-test", state)
+	addedItem := decodeEvent(t, added[0])["item"].(map[string]any)
+	if addedItem["type"] != "apply_patch_call" || addedItem["name"] != nil {
+		t.Fatalf("added item = %#v, want in-progress apply_patch_call without name", addedItem)
+	}
+
+	delta := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type:        "input_json_delta",
+			PartialJSON: `{"operation":{"type":"delete_file","path":"old.txt"}}`,
+		},
+	}, "claude-test", state)
+	if len(delta) != 0 {
+		t.Fatalf("apply_patch input delta emitted %#v, want no function argument delta", delta)
+	}
+
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx,
+	}, "claude-test", state)
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want output_item.done", len(events))
+	}
+	doneItem := decodeEvent(t, events[0])["item"].(map[string]any)
+	if doneItem["type"] != "apply_patch_call" || doneItem["call_id"] != "call_1" {
+		t.Fatalf("done item = %#v, want completed apply_patch_call", doneItem)
+	}
+	op := doneItem["operation"].(map[string]any)
+	if op["type"] != "delete_file" || op["path"] != "old.txt" {
+		t.Fatalf("operation = %#v, want delete_file old.txt", op)
 	}
 }
 

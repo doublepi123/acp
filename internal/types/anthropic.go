@@ -2,20 +2,21 @@ package types
 
 // AnthropicMessageRequest represents an Anthropic Messages API request.
 type AnthropicMessageRequest struct {
-	Model         string             `json:"model"`
-	Messages      []AnthropicMessage `json:"messages"`
-	System        any                `json:"system,omitempty"`
-	MaxTokens     int                `json:"max_tokens"`
-	Temperature   *float64           `json:"temperature,omitempty"`
-	TopP          *float64           `json:"top_p,omitempty"`
-	TopK          *int               `json:"top_k,omitempty"`
-	Stream        bool               `json:"stream,omitempty"`
-	StopSequences []string           `json:"stop_sequences,omitempty"`
-	Tools         []AnthropicTool    `json:"tools,omitempty"`
-	ToolChoice    any                `json:"tool_choice,omitempty"`
-	Thinking      any                `json:"thinking,omitempty"`
-	Metadata      map[string]any     `json:"metadata,omitempty"`
-	CustomTools   map[string]bool    `json:"-"`
+	Model           string             `json:"model"`
+	Messages        []AnthropicMessage `json:"messages"`
+	System          any                `json:"system,omitempty"`
+	MaxTokens       int                `json:"max_tokens"`
+	Temperature     *float64           `json:"temperature,omitempty"`
+	TopP            *float64           `json:"top_p,omitempty"`
+	TopK            *int               `json:"top_k,omitempty"`
+	Stream          bool               `json:"stream,omitempty"`
+	StopSequences   []string           `json:"stop_sequences,omitempty"`
+	Tools           []AnthropicTool    `json:"tools,omitempty"`
+	ToolChoice      any                `json:"tool_choice,omitempty"`
+	Thinking        any                `json:"thinking,omitempty"`
+	Metadata        map[string]any     `json:"metadata,omitempty"`
+	CustomTools     map[string]bool    `json:"-"`
+	ApplyPatchTools map[string]bool    `json:"-"`
 }
 
 // AnthropicMessage represents a message in Anthropic format.

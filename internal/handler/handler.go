@@ -133,7 +133,7 @@ func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, an
 		return
 	}
 
-	openaiResp := translate.ToOpenAIResponse(&anthropicResp, model, anthropicReq.CustomTools)
+	openaiResp := translate.ToOpenAIResponse(&anthropicResp, model, anthropicReq.CustomTools, anthropicReq.ApplyPatchTools)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -189,7 +189,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
-	state := newStreamState(anthropicReq.CustomTools)
+	state := newStreamState(anthropicReq.CustomTools, anthropicReq.ApplyPatchTools)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -254,6 +254,7 @@ type streamState struct {
 	inputTokens     int
 	outputTokens    int
 	customTools     map[string]bool
+	applyPatchTools map[string]bool
 }
 
 func newStreamState(customToolNames ...map[string]bool) *streamState {
@@ -262,6 +263,10 @@ func newStreamState(customToolNames ...map[string]bool) *streamState {
 	customTools := map[string]bool{}
 	if len(customToolNames) > 0 && customToolNames[0] != nil {
 		customTools = customToolNames[0]
+	}
+	applyPatchTools := map[string]bool{}
+	if len(customToolNames) > 1 && customToolNames[1] != nil {
+		applyPatchTools = customToolNames[1]
 	}
 	return &streamState{
 		responseID:      fallbackID,
@@ -280,11 +285,16 @@ func newStreamState(customToolNames ...map[string]bool) *streamState {
 		output:          []any{},
 		outputIndices:   make(map[int]int),
 		customTools:     customTools,
+		applyPatchTools: applyPatchTools,
 	}
 }
 
 func (s *streamState) isCustomTool(name string) bool {
 	return s.customTools[name]
+}
+
+func (s *streamState) isApplyPatchTool(name string) bool {
+	return s.applyPatchTools[name]
 }
 
 func (s *streamState) itemID(idx int, kind string) string {
@@ -396,6 +406,28 @@ func streamStringifyToolInput(input any) string {
 	}
 }
 
+func streamApplyPatchOperation(args string) any {
+	if args == "" {
+		return map[string]any{}
+	}
+	var input any
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return map[string]any{"value": args}
+	}
+	switch v := input.(type) {
+	case map[string]any:
+		if op, ok := v["operation"]; ok {
+			return op
+		}
+		if _, hasType := v["type"]; hasType {
+			if _, hasPath := v["path"]; hasPath {
+				return v
+			}
+		}
+	}
+	return input
+}
+
 func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *streamState) []string {
 	switch event.Type {
 	case "message_start":
@@ -483,7 +515,10 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 				"call_id": event.ContentBlock.ID,
 				"status":  "in_progress",
 			}
-			if state.isCustomTool(event.ContentBlock.Name) {
+			if state.isApplyPatchTool(event.ContentBlock.Name) {
+				item["type"] = "apply_patch_call"
+				delete(item, "name")
+			} else if state.isCustomTool(event.ContentBlock.Name) {
 				item["type"] = "custom_tool_call"
 				item["input"] = ""
 			} else {
@@ -586,6 +621,9 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		case "input_json_delta":
 			state.args[idx] += event.Delta.PartialJSON
 			if state.blockTypes[idx] == "server_tool_use" {
+				return nil
+			}
+			if state.isApplyPatchTool(state.blockNames[idx]) {
 				return nil
 			}
 			if state.isCustomTool(state.blockNames[idx]) {
@@ -693,7 +731,12 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			events = append(events, state.event(textDone))
 		case "tool_use":
-			if state.isCustomTool(state.blockNames[idx]) {
+			if state.isApplyPatchTool(state.blockNames[idx]) {
+				item["type"] = "apply_patch_call"
+				item["call_id"] = state.callIDs[idx]
+				item["operation"] = streamApplyPatchOperation(state.args[idx])
+				state.output = append(state.output, item)
+			} else if state.isCustomTool(state.blockNames[idx]) {
 				input := streamCustomToolInput(state.args[idx])
 				item["type"] = "custom_tool_call"
 				item["name"] = state.blockNames[idx]

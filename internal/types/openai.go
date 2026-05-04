@@ -31,6 +31,7 @@ type InputMessage struct {
 	CallID           string     `json:"call_id,omitempty"`
 	ToolID           string     `json:"tool_call_id,omitempty"`
 	Output           any        `json:"output,omitempty"`
+	Operation        any        `json:"operation,omitempty"`
 	Calls            []ToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -107,6 +108,7 @@ type OutputItem struct {
 	CallID           string `json:"call_id,omitempty"`
 	Arguments        string `json:"arguments,omitempty"`
 	Input            string `json:"input,omitempty"`
+	Operation        any    `json:"operation,omitempty"`
 }
 
 // Usage represents token usage.

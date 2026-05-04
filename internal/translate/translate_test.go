@@ -120,6 +120,37 @@ func TestToAnthropicRequestConvertsCustomTool(t *testing.T) {
 	}
 }
 
+func TestToAnthropicRequestConvertsApplyPatchTool(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "edit a file",
+		Tools: []types.Tool{
+			{
+				Type: "apply_patch",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(Tools) = %d, want 1", len(got.Tools))
+	}
+	tool := got.Tools[0]
+	if tool.Name != "apply_patch" {
+		t.Fatalf("tool.Name = %q, want apply_patch", tool.Name)
+	}
+	schema := tool.InputSchema.(map[string]any)
+	if schema["type"] != "object" {
+		t.Fatalf("InputSchema = %#v, want object schema", schema)
+	}
+	if !got.ApplyPatchTools["apply_patch"] {
+		t.Fatalf("ApplyPatchTools = %#v, want apply_patch marked", got.ApplyPatchTools)
+	}
+}
+
 func TestToAnthropicRequestRejectsFunctionToolWithoutName(t *testing.T) {
 	req := &types.OpenAIResponseRequest{
 		Model:     "claude-sonnet-4-20250514",
@@ -239,6 +270,59 @@ func TestToAnthropicRequestConvertsCustomToolCallAndOutput(t *testing.T) {
 	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
 	if resultBlocks[0].Type != "tool_result" || resultBlocks[0].ToolUseID != "call_1" || resultBlocks[0].Content != "ok" {
 		t.Fatalf("custom tool output = %#v, want tool_result", resultBlocks[0])
+	}
+}
+
+func TestToAnthropicRequestConvertsApplyPatchCallAndOutput(t *testing.T) {
+	operation := map[string]any{
+		"type": "update_file",
+		"path": "README.md",
+		"diff": "@@\n-old\n+new\n",
+	}
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "apply this"},
+				},
+			},
+			map[string]any{
+				"type":      "apply_patch_call",
+				"id":        "apc_1",
+				"call_id":   "call_1",
+				"operation": operation,
+			},
+			map[string]any{
+				"type":    "apply_patch_call_output",
+				"call_id": "call_1",
+				"status":  "completed",
+				"output":  "ok",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(got.Messages))
+	}
+	callBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	input, ok := callBlocks[0].Input.(map[string]any)
+	if !ok || input["operation"] == nil {
+		t.Fatalf("apply_patch input = %#v, want operation wrapper", callBlocks[0].Input)
+	}
+	op := input["operation"].(map[string]any)
+	if op["type"] != "update_file" || op["path"] != "README.md" {
+		t.Fatalf("operation = %#v, want update_file README.md", op)
+	}
+	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
+	if resultBlocks[0].Type != "tool_result" || resultBlocks[0].ToolUseID != "call_1" || resultBlocks[0].Content != "ok" {
+		t.Fatalf("apply_patch_call_output block = %#v, want tool_result", resultBlocks[0])
 	}
 }
 
@@ -834,5 +918,40 @@ func TestToOpenAIResponseConvertsCustomToolUse(t *testing.T) {
 	}
 	if item.Arguments != "" {
 		t.Fatalf("custom tool arguments = %q, want empty", item.Arguments)
+	}
+}
+
+func TestToOpenAIResponseConvertsApplyPatchToolUse(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID: "msg_1",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type: "tool_use",
+				ID:   "call_1",
+				Name: "apply_patch",
+				Input: map[string]any{
+					"operation": map[string]any{
+						"type": "delete_file",
+						"path": "old.txt",
+					},
+				},
+			},
+		},
+	}
+
+	got := ToOpenAIResponse(resp, "claude-test", nil, map[string]bool{"apply_patch": true})
+	if len(got.Output) != 1 {
+		t.Fatalf("len(Output) = %d, want 1", len(got.Output))
+	}
+	item := got.Output[0]
+	if item.Type != "apply_patch_call" || item.CallID != "call_1" || item.Name != "" {
+		t.Fatalf("apply_patch item = %#v, want apply_patch_call", item)
+	}
+	op, ok := item.Operation.(map[string]any)
+	if !ok || op["type"] != "delete_file" || op["path"] != "old.txt" {
+		t.Fatalf("operation = %#v, want delete_file old.txt", item.Operation)
+	}
+	if item.Input != "" || item.Arguments != "" {
+		t.Fatalf("apply_patch input/args = %q/%q, want empty", item.Input, item.Arguments)
 	}
 }
