@@ -17,10 +17,14 @@ import (
 	"github.com/doublepi123/acp/internal/handler"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: acp <command> [args...]\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
+		fmt.Fprintf(os.Stderr, "  version       Show current version\n")
 		fmt.Fprintf(os.Stderr, "  serve         Start the proxy server\n")
 		fmt.Fprintf(os.Stderr, "  codex [args]  Start proxy and launch Codex with proper config\n")
 		fmt.Fprintf(os.Stderr, "  upgrade       Upgrade acp from the latest release\n")
@@ -28,6 +32,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version", "--version", "-v":
+		fmt.Printf("acp %s\n", version)
 	case "serve":
 		runServe()
 	case "codex":

@@ -5,11 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +40,25 @@ func runUpgrade() {
 	opts, err := defaultUpgradeOptions()
 	if err != nil {
 		logFatalUpgrade(err)
+	}
+
+	// Fetch latest release tag if not specified
+	if opts.Tag == "" || opts.Tag == "latest" {
+		client := &http.Client{Timeout: 30 * 1000000000}
+		latestTag, err := latestReleaseTag(context.Background(), client, opts.GitHubBaseURL, opts.Repo)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not fetch latest release: %v\n", err)
+		} else {
+			opts.Tag = latestTag
+			if shouldSkipUpgrade(version, latestTag) {
+				fmt.Printf("acp is already up to date (%s)\n", version)
+				return
+			}
+			if strings.TrimSpace(version) != "" && version != "dev" {
+				fmt.Printf("current: %s\n", version)
+			}
+			fmt.Printf("latest: %s\n", latestTag)
+		}
 	}
 
 	if err := upgrade(opts); err != nil {
@@ -326,4 +347,143 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+
+// shouldSkipUpgrade returns true if the current version is already at or above the target.
+func shouldSkipUpgrade(current, target string) bool {
+	current = strings.TrimSpace(current)
+	target = strings.TrimSpace(target)
+	if current == "" || current == "dev" || target == "" {
+		return false
+	}
+	cmp, ok := compareReleaseVersions(current, target)
+	if !ok {
+		return current == target
+	}
+	return cmp >= 0
+}
+
+// compareReleaseVersions compares two semver version strings.
+// Returns -1, 0, or 1 if current is less than, equal to, or greater than target.
+func compareReleaseVersions(current, target string) (int, bool) {
+	currentVersion, ok := parseReleaseVersion(current)
+	if !ok {
+		return 0, false
+	}
+	targetVersion, ok := parseReleaseVersion(target)
+	if !ok {
+		return 0, false
+	}
+	for i := 0; i < len(currentVersion.numbers) || i < len(targetVersion.numbers); i++ {
+		left := 0
+		if i < len(currentVersion.numbers) {
+			left = currentVersion.numbers[i]
+		}
+		right := 0
+		if i < len(targetVersion.numbers) {
+			right = targetVersion.numbers[i]
+		}
+		switch {
+		case left > right:
+			return 1, true
+		case left < right:
+			return -1, true
+		}
+	}
+	switch {
+	case currentVersion.preRelease == "" && targetVersion.preRelease != "":
+		return 1, true
+	case currentVersion.preRelease != "" && targetVersion.preRelease == "":
+		return -1, true
+	case currentVersion.preRelease > targetVersion.preRelease:
+		return 1, true
+	case currentVersion.preRelease < targetVersion.preRelease:
+		return -1, true
+	default:
+		return 0, true
+	}
+}
+
+type releaseVersion struct {
+	numbers    []int
+	preRelease string
+}
+
+func parseReleaseVersion(value string) (releaseVersion, bool) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "v")
+	value = strings.TrimPrefix(value, "V")
+	if value == "" {
+		return releaseVersion{}, false
+	}
+	if plus := strings.Index(value, "+"); plus >= 0 {
+		value = value[:plus]
+	}
+	preRelease := ""
+	if dash := strings.Index(value, "-"); dash >= 0 {
+		preRelease = value[dash+1:]
+		value = value[:dash]
+	}
+	parts := strings.Split(value, ".")
+	numbers := make([]int, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			return releaseVersion{}, false
+		}
+		n := 0
+		for i := 0; i < len(part); i++ {
+			c := part[i]
+			if c < '0' || c > '9' {
+				return releaseVersion{}, false
+			}
+			n = n*10 + int(c-'0')
+		}
+		numbers = append(numbers, n)
+	}
+	if len(numbers) == 0 {
+		return releaseVersion{}, false
+	}
+	return releaseVersion{numbers: numbers, preRelease: preRelease}, true
+}
+
+func latestReleaseTag(ctx context.Context, client *http.Client, baseURL, repo string) (string, error) {
+	latestURL := fmt.Sprintf("%s/%s/releases/latest", strings.TrimRight(strings.TrimSpace(baseURL), "/"), strings.Trim(strings.TrimSpace(repo), "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "acp/"+version)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return "", fmt.Errorf("check latest release failed: %s", resp.Status)
+	}
+	tag := tagFromReleaseURL(resp.Request.URL)
+	if tag == "" {
+		return "", fmt.Errorf("could not determine latest release tag from %s", resp.Request.URL)
+	}
+	return tag, nil
+}
+
+func tagFromReleaseURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] != "tag" {
+			continue
+		}
+		tag, err := url.PathUnescape(parts[i+1])
+		if err != nil {
+			return parts[i+1]
+		}
+		return tag
+	}
+	return ""
 }

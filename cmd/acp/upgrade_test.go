@@ -151,3 +151,59 @@ func testZip(t *testing.T, files map[string]string) []byte {
 
 	return buf.Bytes()
 }
+
+func TestShouldSkipUpgrade(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		target  string
+		want    bool
+	}{
+		{"same version", "v1.0.0", "v1.0.0", true},
+		{"current newer", "v1.1.0", "v1.0.0", true},
+		{"current older", "v1.0.0", "v1.1.0", false},
+		{"dev always upgrades", "dev", "v1.0.0", false},
+		{"empty current upgrades", "", "v1.0.0", false},
+		{"empty target skips", "v1.0.0", "", false},
+		{"patch bump", "v1.0.0", "v1.0.1", false},
+		{"major bump", "v1.0.0", "v2.0.0", false},
+		{"pre-release vs release", "v1.0.0-beta", "v1.0.0", false},
+		{"release vs pre-release", "v1.0.0", "v1.0.0-beta", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSkipUpgrade(tt.current, tt.target); got != tt.want {
+				t.Fatalf("shouldSkipUpgrade(%q, %q) = %v, want %v", tt.current, tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompareReleaseVersions(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		target  string
+		want    int
+		wantOK  bool
+	}{
+		{"equal", "v1.0.0", "v1.0.0", 0, true},
+		{"patch less", "v1.0.0", "v1.0.1", -1, true},
+		{"patch greater", "v1.0.2", "v1.0.1", 1, true},
+		{"minor less", "v1.0.0", "v1.1.0", -1, true},
+		{"major greater", "v2.0.0", "v1.9.9", 1, true},
+		{"no v prefix", "1.0.0", "1.0.0", 0, true},
+		{"invalid", "abc", "v1.0.0", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := compareReleaseVersions(tt.current, tt.target)
+			if ok != tt.wantOK {
+				t.Fatalf("compareReleaseVersions(%q, %q) ok = %v, want %v", tt.current, tt.target, ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("compareReleaseVersions(%q, %q) = %d, want %d", tt.current, tt.target, got, tt.want)
+			}
+		})
+	}
+}

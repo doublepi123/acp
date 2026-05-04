@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -49,7 +51,14 @@ jobs:
             exit 0
           fi
 
-          # Otherwise auto-increment from the latest tag
+          # Check if HEAD is already tagged
+          if CURRENT_TAG=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n 1); [ -n "$CURRENT_TAG" ]; then
+            echo "tag=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
+            echo "Commit already tagged as $CURRENT_TAG"
+            exit 0
+          fi
+
+          # Auto-increment from the latest tag
           LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)
           LAST_TAG=${LAST_TAG:-v0.0.0}
           major=$(echo "$LAST_TAG" | cut -d. -f1 | tr -d v)
@@ -97,7 +106,7 @@ jobs:
             EXTENSION=".exe"
           fi
           OUTPUT_NAME="${{ env.PROJECT_NAME }}-${GOOS}-${GOARCH}${EXTENSION}"
-          go build -ldflags="-s -w" -o "$OUTPUT_NAME" ./cmd/acp
+          go build -ldflags="-s -w -X main.version=${VERSION}" -o "$OUTPUT_NAME" ./cmd/acp
 
           if [ "$GOOS" = "windows" ]; then
             mv "$OUTPUT_NAME" "acp.exe"
