@@ -776,11 +776,19 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 
 	output = append(output, functionCalls...)
 
+	status := "completed"
+	var incompleteDetails *types.IncompleteDetails
+	switch anthropicResp.StopReason {
+	case "max_tokens":
+		status = "incomplete"
+		incompleteDetails = &types.IncompleteDetails{Reason: "max_output_tokens"}
+	}
+
 	return &types.OpenAIResponse{
 		ID:        anthropicResp.ID,
 		Object:    "response",
 		CreatedAt: time.Now().Unix(),
-		Status:    "completed",
+		Status:    status,
 		Model:     model,
 		Output:    output,
 		Usage: &types.Usage{
@@ -788,6 +796,7 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 			OutputTokens: anthropicResp.Usage.OutputTokens,
 			TotalTokens:  anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
 		},
+		IncompleteDetails: incompleteDetails,
 	}
 }
 

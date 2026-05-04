@@ -88,6 +88,7 @@ type OpenAIResponse struct {
 	Usage     *Usage         `json:"usage,omitempty"`
 	Error     *APIError      `json:"error,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
+	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
 }
 
 // OutputItem represents an item in the response output array.
@@ -110,6 +111,11 @@ type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+}
+
+// IncompleteDetails represents details about why a response is incomplete.
+type IncompleteDetails struct {
+	Reason string `json:"reason"`
 }
 
 // APIError represents an API error.

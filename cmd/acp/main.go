@@ -51,7 +51,7 @@ func runServe() {
 	mux.HandleFunc("/v1/responses", h.HandleResponses)
 	mux.HandleFunc("/health", h.HandleHealth)
 
-	addr := ":" + cfg.Port
+	addr := cfg.Host + ":" + cfg.Port
 	log.Printf("acp proxy listening on %s (model: %s)", addr, cfg.DefaultModel)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server failed: %v", err)
@@ -75,12 +75,12 @@ func runCodex() {
 	mux.HandleFunc("/v1/responses", h.HandleResponses)
 	mux.HandleFunc("/health", h.HandleHealth)
 
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	// Start proxy in background
 	go func() {
-		log.Printf("acp proxy started on http://localhost%s (model: %s)", addr, cfg.DefaultModel)
+		log.Printf("acp proxy started on http://%s (model: %s)", addr, cfg.DefaultModel)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("proxy error: %v", err)
 		}

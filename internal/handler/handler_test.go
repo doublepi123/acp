@@ -48,7 +48,14 @@ func TestConvertStreamEventUsesStableResponseAndItemIDs(t *testing.T) {
 		Type:  "content_block_stop",
 		Index: &idx,
 	}, "claude-test", state)
-	doneItem := decodeEvent(t, done[0])["item"].(map[string]any)
+	if len(done) != 2 {
+		t.Fatalf("len(done) = %d, want output_text.done and output_item.done", len(done))
+	}
+	textDone := decodeEvent(t, done[0])
+	if textDone["type"] != "response.output_text.done" {
+		t.Fatalf("first done event type = %#v, want response.output_text.done", textDone["type"])
+	}
+	doneItem := decodeEvent(t, done[1])["item"].(map[string]any)
 	if addedItem["id"] != doneItem["id"] {
 		t.Fatalf("added id = %#v, done id = %#v, want stable id", addedItem["id"], doneItem["id"])
 	}

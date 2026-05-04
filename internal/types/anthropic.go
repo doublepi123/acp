@@ -112,6 +112,8 @@ type AnthropicDelta struct {
 	Signature   string             `json:"signature,omitempty"`
 	PartialJSON string             `json:"partial_json,omitempty"`
 	Citation    *AnthropicCitation `json:"citation,omitempty"`
+	StopReason  string             `json:"stop_reason,omitempty"`
+	StopSequence string            `json:"stop_sequence,omitempty"`
 }
 
 // AnthropicError represents an Anthropic API error.

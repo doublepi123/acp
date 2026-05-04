@@ -14,6 +14,7 @@ type ClaudeSettings struct {
 
 // Config holds the application configuration.
 type Config struct {
+	Host         string
 	Port         string
 	AnthropicURL string
 	AnthropicKey string
@@ -23,6 +24,7 @@ type Config struct {
 // Load reads configuration, with Claude Code settings as fallback.
 func Load() *Config {
 	cfg := &Config{
+		Host: getEnv("HOST", "127.0.0.1"),
 		Port: getEnv("PORT", "45376"),
 	}
 
