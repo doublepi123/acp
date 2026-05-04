@@ -227,6 +227,10 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 		}
 	}
 
+	if blocks, ok := content.([]types.AnthropicContentBlock); ok && len(blocks) == 0 {
+		return nil
+	}
+
 	return &types.AnthropicMessage{
 		Role:    role,
 		Content: content,
@@ -257,21 +261,14 @@ func convertReasoningMessage(msg types.InputMessage) *types.AnthropicMessage {
 		content = reasoningText(msg.Summary)
 	}
 
-	var block types.AnthropicContentBlock
-	if content == "" && msg.EncryptedContent != "" {
-		block = types.AnthropicContentBlock{
-			Type: "redacted_thinking",
-			Data: msg.EncryptedContent,
-		}
-	} else {
-		block = types.AnthropicContentBlock{
-			Type:      "thinking",
-			Thinking:  content,
-			Signature: msg.EncryptedContent,
-		}
-	}
-	if block.Thinking == "" && block.Data == "" {
+	if content == "" {
 		return nil
+	}
+
+	block := types.AnthropicContentBlock{
+		Type:      "thinking",
+		Thinking:  content,
+		Signature: msg.EncryptedContent,
 	}
 
 	return &types.AnthropicMessage{
@@ -434,7 +431,7 @@ func convertContentBlock(item any) *types.AnthropicContentBlock {
 			Signature: textValueKey(m, "signature"),
 		}
 	case "redacted_thinking":
-		return &types.AnthropicContentBlock{Type: "redacted_thinking", Data: textValueKey(m, "data")}
+		return nil
 	case "image_url":
 		return imageBlock(imageURLValue(m["image_url"]))
 	case "input_image":

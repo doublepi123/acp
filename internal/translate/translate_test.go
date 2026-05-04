@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/lcy/anthropic-openai-proxy/internal/types"
@@ -210,6 +211,107 @@ func TestToAnthropicRequestPreservesReasoningWithFunctionCall(t *testing.T) {
 	}
 	if assistantBlocks[1].Type != "tool_use" || assistantBlocks[1].ID != "call_1" {
 		t.Fatalf("tool block = %#v, want tool_use after thinking", assistantBlocks[1])
+	}
+}
+
+func TestToAnthropicRequestDropsOpaqueOnlyReasoning(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "look this up"},
+				},
+			},
+			map[string]any{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"encrypted_content": "opaque_1",
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_1",
+				"call_id":   "call_1",
+				"name":      "lookup",
+				"arguments": `{"q":"weather"}`,
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want user plus assistant tool call", len(got.Messages))
+	}
+	assistantBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	if len(assistantBlocks) != 1 || assistantBlocks[0].Type != "tool_use" {
+		t.Fatalf("assistantBlocks = %#v, want only tool_use", assistantBlocks)
+	}
+	raw, err := json.Marshal(got.Messages)
+	if err != nil {
+		t.Fatalf("json.Marshal messages: %v", err)
+	}
+	if strings.Contains(string(raw), "redacted_thinking") {
+		t.Fatalf("messages JSON contains redacted_thinking: %s", string(raw))
+	}
+}
+
+func TestToAnthropicRequestDropsRedactedThinkingContentBlock(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "redacted_thinking", "data": "opaque_1"},
+					map[string]any{"type": "output_text", "text": "visible"},
+				},
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	blocks := got.Messages[0].Content.([]types.AnthropicContentBlock)
+	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "visible" {
+		t.Fatalf("blocks = %#v, want only visible text", blocks)
+	}
+}
+
+func TestToAnthropicRequestDropsRedactedOnlyContentMessage(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "continue"},
+				},
+			},
+			map[string]any{
+				"type": "message",
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "redacted_thinking", "data": "opaque_1"},
+				},
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Role != "user" {
+		t.Fatalf("messages = %#v, want only user message", got.Messages)
 	}
 }
 
