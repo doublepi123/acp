@@ -15,6 +15,7 @@ type AnthropicMessageRequest struct {
 	ToolChoice    any                `json:"tool_choice,omitempty"`
 	Thinking      any                `json:"thinking,omitempty"`
 	Metadata      map[string]any     `json:"metadata,omitempty"`
+	CustomTools   map[string]bool    `json:"-"`
 }
 
 // AnthropicMessage represents a message in Anthropic format.
@@ -106,14 +107,14 @@ type AnthropicStreamEvent struct {
 
 // AnthropicDelta represents a delta update in streaming.
 type AnthropicDelta struct {
-	Type        string             `json:"type,omitempty"`
-	Text        string             `json:"text,omitempty"`
-	Thinking    string             `json:"thinking,omitempty"`
-	Signature   string             `json:"signature,omitempty"`
-	PartialJSON string             `json:"partial_json,omitempty"`
-	Citation    *AnthropicCitation `json:"citation,omitempty"`
-	StopReason  string             `json:"stop_reason,omitempty"`
-	StopSequence string            `json:"stop_sequence,omitempty"`
+	Type         string             `json:"type,omitempty"`
+	Text         string             `json:"text,omitempty"`
+	Thinking     string             `json:"thinking,omitempty"`
+	Signature    string             `json:"signature,omitempty"`
+	PartialJSON  string             `json:"partial_json,omitempty"`
+	Citation     *AnthropicCitation `json:"citation,omitempty"`
+	StopReason   string             `json:"stop_reason,omitempty"`
+	StopSequence string             `json:"stop_sequence,omitempty"`
 }
 
 // AnthropicError represents an Anthropic API error.

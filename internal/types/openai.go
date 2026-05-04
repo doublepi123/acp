@@ -27,6 +27,7 @@ type InputMessage struct {
 	Status           string     `json:"status,omitempty"`
 	Name             string     `json:"name,omitempty"`
 	Arguments        string     `json:"arguments,omitempty"`
+	Input            string     `json:"input,omitempty"`
 	CallID           string     `json:"call_id,omitempty"`
 	ToolID           string     `json:"tool_call_id,omitempty"`
 	Output           any        `json:"output,omitempty"`
@@ -46,6 +47,7 @@ type Tool struct {
 	UserLocation      any               `json:"user_location,omitempty"`
 	SearchContextSize string            `json:"search_context_size,omitempty"`
 	Filters           *WebSearchFilters `json:"filters,omitempty"`
+	Format            any               `json:"format,omitempty"`
 }
 
 // WebSearchFilters represents nested filters for web search tools.
@@ -79,15 +81,15 @@ type FunctionCallData struct {
 
 // OpenAIResponse represents the OpenAI Response API response.
 type OpenAIResponse struct {
-	ID        string         `json:"id"`
-	Object    string         `json:"object"`
-	CreatedAt int64          `json:"created_at"`
-	Status    string         `json:"status"`
-	Model     string         `json:"model"`
-	Output    []OutputItem   `json:"output"`
-	Usage     *Usage         `json:"usage,omitempty"`
-	Error     *APIError      `json:"error,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	ID                string             `json:"id"`
+	Object            string             `json:"object"`
+	CreatedAt         int64              `json:"created_at"`
+	Status            string             `json:"status"`
+	Model             string             `json:"model"`
+	Output            []OutputItem       `json:"output"`
+	Usage             *Usage             `json:"usage,omitempty"`
+	Error             *APIError          `json:"error,omitempty"`
+	Metadata          map[string]any     `json:"metadata,omitempty"`
 	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
 }
 
@@ -104,6 +106,7 @@ type OutputItem struct {
 	Name             string `json:"name,omitempty"`
 	CallID           string `json:"call_id,omitempty"`
 	Arguments        string `json:"arguments,omitempty"`
+	Input            string `json:"input,omitempty"`
 }
 
 // Usage represents token usage.

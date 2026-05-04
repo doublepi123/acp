@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lcy/anthropic-openai-proxy/internal/types"
+	"github.com/doublepi123/acp/internal/types"
 )
 
 func TestConvertStreamEventUsesStableResponseAndItemIDs(t *testing.T) {
@@ -125,6 +125,60 @@ func TestConvertStreamEventAccumulatesFunctionArguments(t *testing.T) {
 	}
 	if doneItem["call_id"] != "call_1" || doneItem["arguments"] != `{"q":"weather"}` {
 		t.Fatalf("done item = %#v, want call_id and accumulated arguments", doneItem)
+	}
+}
+
+func TestConvertStreamEventMapsCustomToolCall(t *testing.T) {
+	state := newStreamState(map[string]bool{"apply_patch": true})
+	idx := 1
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	added := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "tool_use",
+			ID:   "call_1",
+			Name: "apply_patch",
+		},
+	}, "claude-test", state)
+	addedItem := decodeEvent(t, added[0])["item"].(map[string]any)
+	if addedItem["type"] != "custom_tool_call" || addedItem["input"] != "" {
+		t.Fatalf("added item = %#v, want in-progress custom_tool_call", addedItem)
+	}
+
+	delta := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type:        "input_json_delta",
+			PartialJSON: `{"input":"patch text"}`,
+		},
+	}, "claude-test", state)
+	if len(delta) != 0 {
+		t.Fatalf("custom tool input delta emitted %#v, want no JSON argument delta", delta)
+	}
+
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx,
+	}, "claude-test", state)
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want input.done and output_item.done", len(events))
+	}
+	inputDone := decodeEvent(t, events[0])
+	if inputDone["type"] != "response.custom_tool_call_input.done" || inputDone["input"] != "patch text" {
+		t.Fatalf("input done = %#v, want finalized custom input", inputDone)
+	}
+	doneItem := decodeEvent(t, events[1])["item"].(map[string]any)
+	if doneItem["type"] != "custom_tool_call" || doneItem["input"] != "patch text" {
+		t.Fatalf("done item = %#v, want completed custom_tool_call", doneItem)
 	}
 }
 

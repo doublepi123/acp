@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/lcy/anthropic-openai-proxy/internal/translate"
-	"github.com/lcy/anthropic-openai-proxy/internal/types"
+	"github.com/doublepi123/acp/internal/translate"
+	"github.com/doublepi123/acp/internal/types"
 )
 
 const maxRequestBodyBytes = 64 << 20
@@ -133,7 +133,7 @@ func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, an
 		return
 	}
 
-	openaiResp := translate.ToOpenAIResponse(&anthropicResp, model)
+	openaiResp := translate.ToOpenAIResponse(&anthropicResp, model, anthropicReq.CustomTools)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -189,7 +189,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
-	state := newStreamState()
+	state := newStreamState(anthropicReq.CustomTools)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -253,11 +253,16 @@ type streamState struct {
 	stopReason      string
 	inputTokens     int
 	outputTokens    int
+	customTools     map[string]bool
 }
 
-func newStreamState() *streamState {
+func newStreamState(customToolNames ...map[string]bool) *streamState {
 	now := time.Now()
 	fallbackID := fmt.Sprintf("resp_%d", now.UnixNano())
+	customTools := map[string]bool{}
+	if len(customToolNames) > 0 && customToolNames[0] != nil {
+		customTools = customToolNames[0]
+	}
 	return &streamState{
 		responseID:      fallbackID,
 		createdAt:       now.Unix(),
@@ -274,7 +279,12 @@ func newStreamState() *streamState {
 		citationTextLen: make(map[int]int),
 		output:          []any{},
 		outputIndices:   make(map[int]int),
+		customTools:     customTools,
 	}
+}
+
+func (s *streamState) isCustomTool(name string) bool {
+	return s.customTools[name]
 }
 
 func (s *streamState) itemID(idx int, kind string) string {
@@ -313,28 +323,62 @@ func streamWebSearchAction(args string) map[string]any {
 	return action
 }
 
+func streamCustomToolInput(args string) string {
+	if args == "" {
+		return ""
+	}
+	var input any
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return args
+	}
+	switch v := input.(type) {
+	case map[string]any:
+		if raw, ok := v["input"]; ok {
+			return streamStringifyToolInput(raw)
+		}
+	case string:
+		return v
+	}
+	return streamStringifyToolInput(input)
+}
+
+func streamStringifyToolInput(input any) string {
+	switch v := input.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(b)
+	}
+}
+
 func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *streamState) []string {
 	switch event.Type {
 	case "message_start":
-			if event.Message != nil && event.Message.ID != "" {
-				state.responseID = event.Message.ID
-			}
-			if event.Message != nil {
-				state.inputTokens = event.Message.Usage.InputTokens
-				state.outputTokens = event.Message.Usage.OutputTokens
-			}
-			resp := map[string]any{
-				"type": "response.created",
-				"response": map[string]any{
-					"id":         state.responseID,
-					"object":     "response",
-					"created_at": state.createdAt,
-					"status":     "in_progress",
-					"model":      model,
-					"output":     []any{},
-				},
-			}
-			return []string{state.event(resp)}
+		if event.Message != nil && event.Message.ID != "" {
+			state.responseID = event.Message.ID
+		}
+		if event.Message != nil {
+			state.inputTokens = event.Message.Usage.InputTokens
+			state.outputTokens = event.Message.Usage.OutputTokens
+		}
+		resp := map[string]any{
+			"type": "response.created",
+			"response": map[string]any{
+				"id":         state.responseID,
+				"object":     "response",
+				"created_at": state.createdAt,
+				"status":     "in_progress",
+				"model":      model,
+				"output":     []any{},
+			},
+		}
+		return []string{state.event(resp)}
 
 	case "content_block_start":
 		if event.ContentBlock == nil || event.Index == nil {
@@ -393,18 +437,24 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			itemID := state.itemID(idx, "call")
 			state.callIDs[idx] = event.ContentBlock.ID
 			state.callIndex[event.ContentBlock.ID] = idx
+			item := map[string]any{
+				"id":      itemID,
+				"type":    "function_call",
+				"name":    event.ContentBlock.Name,
+				"call_id": event.ContentBlock.ID,
+				"status":  "in_progress",
+			}
+			if state.isCustomTool(event.ContentBlock.Name) {
+				item["type"] = "custom_tool_call"
+				item["input"] = ""
+			} else {
+				item["arguments"] = ""
+			}
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"response_id":  state.responseID,
 				"output_index": state.outputIndices[idx],
-				"item": map[string]any{
-					"id":        itemID,
-					"type":      "function_call",
-					"name":      event.ContentBlock.Name,
-					"call_id":   event.ContentBlock.ID,
-					"arguments": "",
-					"status":    "in_progress",
-				},
+				"item":         item,
 			}
 			return []string{state.event(resp)}
 		case "server_tool_use":
@@ -430,40 +480,40 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			return []string{state.event(resp)}
 		case "web_search_tool_result", "web_search_results":
-				toolUseID := event.ContentBlock.ToolUseID
-				searchIdx, ok := state.callIndex[toolUseID]
-				if !ok {
-					return nil
-				}
-				itemID := state.itemID(searchIdx, "web_search")
-				item := map[string]any{
-					"id":     itemID,
-					"type":   "web_search_call",
-					"status": "completed",
-					"action": streamWebSearchAction(state.args[searchIdx]),
-				}
-				state.output = append(state.output, item)
-				outIdx := state.outputIndices[searchIdx]
-				return []string{
-					state.event(map[string]any{
-						"type":         "response.web_search_call.completed",
-						"response_id":  state.responseID,
-						"output_index": outIdx,
-						"item_id":      itemID,
-					}),
-					state.event(map[string]any{
-						"type":         "response.output_item.done",
-						"response_id":  state.responseID,
-						"output_index": outIdx,
-						"item":         item,
-					}),
-				}
-			default:
-				// Assign an output index for unknown content block types to avoid
-				// index misalignment with subsequent blocks.
-				state.outputIndices[idx] = state.nextOutputIdx
-				state.nextOutputIdx++
+			toolUseID := event.ContentBlock.ToolUseID
+			searchIdx, ok := state.callIndex[toolUseID]
+			if !ok {
+				return nil
 			}
+			itemID := state.itemID(searchIdx, "web_search")
+			item := map[string]any{
+				"id":     itemID,
+				"type":   "web_search_call",
+				"status": "completed",
+				"action": streamWebSearchAction(state.args[searchIdx]),
+			}
+			state.output = append(state.output, item)
+			outIdx := state.outputIndices[searchIdx]
+			return []string{
+				state.event(map[string]any{
+					"type":         "response.web_search_call.completed",
+					"response_id":  state.responseID,
+					"output_index": outIdx,
+					"item_id":      itemID,
+				}),
+				state.event(map[string]any{
+					"type":         "response.output_item.done",
+					"response_id":  state.responseID,
+					"output_index": outIdx,
+					"item":         item,
+				}),
+			}
+		default:
+			// Assign an output index for unknown content block types to avoid
+			// index misalignment with subsequent blocks.
+			state.outputIndices[idx] = state.nextOutputIdx
+			state.nextOutputIdx++
+		}
 
 	case "content_block_delta":
 		if event.Delta == nil {
@@ -491,6 +541,9 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		case "input_json_delta":
 			state.args[idx] += event.Delta.PartialJSON
 			if state.blockTypes[idx] == "server_tool_use" {
+				return nil
+			}
+			if state.isCustomTool(state.blockNames[idx]) {
 				return nil
 			}
 			resp := map[string]any{
@@ -576,40 +629,57 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			state.output = append(state.output, item)
 		case "text":
-				item["type"] = "message"
-				item["role"] = "assistant"
-				item["content"] = []map[string]any{
-					{
-						"type": "output_text",
-						"text": state.text[idx],
-					},
-				}
-				state.output = append(state.output, item)
-				textDone := map[string]any{
-					"type":          "response.output_text.done",
-					"response_id":   state.responseID,
-					"output_index":  state.outputIndices[idx],
-					"item_id":       itemID,
-					"content_index": 0,
-					"text":          state.text[idx],
-				}
-				events = append(events, state.event(textDone))
-		case "tool_use":
-			item["type"] = "function_call"
-			item["name"] = state.blockNames[idx]
-			item["call_id"] = state.callIDs[idx]
-			item["arguments"] = state.args[idx]
-			state.output = append(state.output, item)
-			done := map[string]any{
-				"type":         "response.function_call_arguments.done",
-				"response_id":  state.responseID,
-				"output_index": state.outputIndices[idx],
-				"item_id":      itemID,
-				"call_id":      state.callIDs[idx],
-				"name":         state.blockNames[idx],
-				"arguments":    state.args[idx],
+			item["type"] = "message"
+			item["role"] = "assistant"
+			item["content"] = []map[string]any{
+				{
+					"type": "output_text",
+					"text": state.text[idx],
+				},
 			}
-			events = append(events, state.event(done))
+			state.output = append(state.output, item)
+			textDone := map[string]any{
+				"type":          "response.output_text.done",
+				"response_id":   state.responseID,
+				"output_index":  state.outputIndices[idx],
+				"item_id":       itemID,
+				"content_index": 0,
+				"text":          state.text[idx],
+			}
+			events = append(events, state.event(textDone))
+		case "tool_use":
+			if state.isCustomTool(state.blockNames[idx]) {
+				input := streamCustomToolInput(state.args[idx])
+				item["type"] = "custom_tool_call"
+				item["name"] = state.blockNames[idx]
+				item["call_id"] = state.callIDs[idx]
+				item["input"] = input
+				state.output = append(state.output, item)
+				done := map[string]any{
+					"type":         "response.custom_tool_call_input.done",
+					"response_id":  state.responseID,
+					"output_index": state.outputIndices[idx],
+					"item_id":      itemID,
+					"input":        input,
+				}
+				events = append(events, state.event(done))
+			} else {
+				item["type"] = "function_call"
+				item["name"] = state.blockNames[idx]
+				item["call_id"] = state.callIDs[idx]
+				item["arguments"] = state.args[idx]
+				state.output = append(state.output, item)
+				done := map[string]any{
+					"type":         "response.function_call_arguments.done",
+					"response_id":  state.responseID,
+					"output_index": state.outputIndices[idx],
+					"item_id":      itemID,
+					"call_id":      state.callIDs[idx],
+					"name":         state.blockNames[idx],
+					"arguments":    state.args[idx],
+				}
+				events = append(events, state.event(done))
+			}
 		case "server_tool_use":
 			searching := map[string]any{
 				"type":         "response.web_search_call.searching",
@@ -631,46 +701,39 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		return events
 
 	case "message_delta":
-			if event.Delta != nil {
-				state.stopReason = event.Delta.StopReason
-			}
-			if event.Usage != nil {
-				state.outputTokens = event.Usage.OutputTokens
-			}
-			status := "completed"
-			var incompleteDetails map[string]any
-			switch state.stopReason {
-			case "max_tokens":
-				status = "incomplete"
-				incompleteDetails = map[string]any{"reason": "max_output_tokens"}
-			}
-			resp := map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"id":                state.responseID,
-					"object":            "response",
-					"status":            status,
-					"model":             model,
-					"output":            state.output,
-					"usage": map[string]any{
-						"input_tokens":  state.inputTokens,
-						"output_tokens": state.outputTokens,
-						"total_tokens":  state.inputTokens + state.outputTokens,
-					},
-					"incomplete_details": incompleteDetails,
+		if event.Delta != nil {
+			state.stopReason = event.Delta.StopReason
+		}
+		if event.Usage != nil {
+			state.outputTokens = event.Usage.OutputTokens
+		}
+		status := "completed"
+		var incompleteDetails map[string]any
+		switch state.stopReason {
+		case "max_tokens":
+			status = "incomplete"
+			incompleteDetails = map[string]any{"reason": "max_output_tokens"}
+		}
+		resp := map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":     state.responseID,
+				"object": "response",
+				"status": status,
+				"model":  model,
+				"output": state.output,
+				"usage": map[string]any{
+					"input_tokens":  state.inputTokens,
+					"output_tokens": state.outputTokens,
+					"total_tokens":  state.inputTokens + state.outputTokens,
 				},
-			}
-			return []string{state.event(resp)}
+				"incomplete_details": incompleteDetails,
+			},
+		}
+		return []string{state.event(resp)}
 
 	case "message_stop":
 		return nil
-
-	case "error":
-		resp := map[string]any{
-			"type":  "error",
-			"error": event.Error,
-		}
-		return []string{state.event(resp)}
 	}
 
 	return nil

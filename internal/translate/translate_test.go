@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lcy/anthropic-openai-proxy/internal/types"
+	"github.com/doublepi123/acp/internal/types"
 )
 
 func TestToAnthropicRequestConvertsWebSearchToolWithName(t *testing.T) {
@@ -80,6 +80,43 @@ func TestToAnthropicRequestConvertsNestedFunctionTool(t *testing.T) {
 	}
 	if tool.InputSchema == nil {
 		t.Fatal("tool.InputSchema is nil, want nested parameters")
+	}
+}
+
+func TestToAnthropicRequestConvertsCustomTool(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "use a custom tool",
+		Tools: []types.Tool{
+			{
+				Type:        "custom",
+				Name:        "apply_patch",
+				Description: "Apply a patch.",
+				Format:      map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("len(Tools) = %d, want 1", len(got.Tools))
+	}
+	tool := got.Tools[0]
+	if tool.Name != "apply_patch" {
+		t.Fatalf("tool.Name = %q, want apply_patch", tool.Name)
+	}
+	if !strings.Contains(tool.Description, "Apply a patch.") || !strings.Contains(tool.Description, "grammar") {
+		t.Fatalf("tool.Description = %q, want original description plus format hint", tool.Description)
+	}
+	schema := tool.InputSchema.(map[string]any)
+	if schema["type"] != "object" {
+		t.Fatalf("InputSchema = %#v, want object schema", schema)
+	}
+	if !got.CustomTools["apply_patch"] {
+		t.Fatalf("CustomTools = %#v, want apply_patch marked custom", got.CustomTools)
 	}
 }
 
@@ -158,6 +195,50 @@ func TestToAnthropicRequestConvertsResponsesInputBlocksAndFunctionOutput(t *test
 	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
 	if resultBlocks[0].Type != "tool_result" || resultBlocks[0].ToolUseID != "call_1" || resultBlocks[0].Content != "sunny" {
 		t.Fatalf("function_call_output block = %#v, want tool_result", resultBlocks[0])
+	}
+}
+
+func TestToAnthropicRequestConvertsCustomToolCallAndOutput(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "apply this"},
+				},
+			},
+			map[string]any{
+				"type":    "custom_tool_call",
+				"id":      "ctc_1",
+				"call_id": "call_1",
+				"name":    "apply_patch",
+				"input":   "*** Begin Patch\n*** End Patch",
+			},
+			map[string]any{
+				"type":    "custom_tool_call_output",
+				"call_id": "call_1",
+				"output":  "ok",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(got.Messages))
+	}
+	callBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	input, ok := callBlocks[0].Input.(map[string]any)
+	if !ok || input["input"] != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("custom tool input = %#v, want wrapped input string", callBlocks[0].Input)
+	}
+	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
+	if resultBlocks[0].Type != "tool_result" || resultBlocks[0].ToolUseID != "call_1" || resultBlocks[0].Content != "ok" {
+		t.Fatalf("custom tool output = %#v, want tool_result", resultBlocks[0])
 	}
 }
 
@@ -330,7 +411,7 @@ func TestToAnthropicRequestConvertsReasoningConfig(t *testing.T) {
 		t.Fatalf("ToAnthropicRequest returned error: %v", err)
 	}
 	thinking := got.Thinking.(map[string]any)
-	if thinking["type"] != "enabled" || thinking["budget_tokens"] != 1024 {
+	if thinking["type"] != "enabled" || thinking["budget_tokens"] != 3072 {
 		t.Fatalf("Thinking = %#v, want enabled budget", thinking)
 	}
 }
@@ -724,5 +805,34 @@ func TestToOpenAIResponseConvertsThinkingBlocksToReasoning(t *testing.T) {
 	}
 	if got.Output[1].Type != "function_call" || got.Output[1].CallID != "call_1" {
 		t.Fatalf("function item = %#v, want function_call after reasoning", got.Output[1])
+	}
+}
+
+func TestToOpenAIResponseConvertsCustomToolUse(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID: "msg_1",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "apply_patch",
+				Input: map[string]any{"input": "*** Begin Patch\n*** End Patch"},
+			},
+		},
+	}
+
+	got := ToOpenAIResponse(resp, "claude-test", map[string]bool{"apply_patch": true})
+	if len(got.Output) != 1 {
+		t.Fatalf("len(Output) = %d, want 1", len(got.Output))
+	}
+	item := got.Output[0]
+	if item.Type != "custom_tool_call" || item.CallID != "call_1" || item.Name != "apply_patch" {
+		t.Fatalf("custom tool item = %#v, want custom_tool_call", item)
+	}
+	if item.Input != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("custom tool input = %q, want patch text", item.Input)
+	}
+	if item.Arguments != "" {
+		t.Fatalf("custom tool arguments = %q, want empty", item.Arguments)
 	}
 }

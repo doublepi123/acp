@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/lcy/anthropic-openai-proxy/internal/types"
+	"github.com/doublepi123/acp/internal/types"
 )
 
 // ToAnthropicRequest converts an OpenAI Response API request to an Anthropic Messages request.
@@ -60,6 +60,19 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 					Name:        name,
 					Description: description,
 					InputSchema: parameters,
+				})
+			case "custom":
+				if t.Name == "" {
+					return nil, fmt.Errorf("custom tool missing name")
+				}
+				if anthropicReq.CustomTools == nil {
+					anthropicReq.CustomTools = make(map[string]bool)
+				}
+				anthropicReq.CustomTools[t.Name] = true
+				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
+					Name:        t.Name,
+					Description: customToolDescription(t.Description, t.Format),
+					InputSchema: customToolInputSchema(),
 				})
 			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 				allowedDomains := t.AllowedDomains
@@ -121,13 +134,42 @@ func convertReasoningConfig(reasoning any, maxTokens int) any {
 			return nil
 		}
 	}
-	budget := 1024
-	if maxTokens <= budget {
-		budget = maxTokens - 1
+	budget := maxTokens * 3 / 4
+	if budget < 1024 {
+		budget = 1024
 	}
 	return map[string]any{
 		"type":          "enabled",
 		"budget_tokens": budget,
+	}
+}
+
+func customToolDescription(description string, format any) string {
+	if format == nil {
+		return description
+	}
+	b, err := json.Marshal(format)
+	if err != nil || len(b) == 0 {
+		return description
+	}
+	formatHint := "Custom tool input format: " + string(b)
+	if description == "" {
+		return formatHint
+	}
+	return description + "\n\n" + formatHint
+}
+
+func customToolInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"input": map[string]any{
+				"type":        "string",
+				"description": "Free-form input for the custom tool.",
+			},
+		},
+		"required":             []string{"input"},
+		"additionalProperties": false,
 	}
 }
 
@@ -158,7 +200,7 @@ func convertToolChoice(tc any) any {
 	case map[string]any:
 		if t, ok := v["type"]; ok {
 			switch t {
-			case "function":
+			case "function", "custom":
 				if name, ok := v["name"].(string); ok {
 					return map[string]any{"type": "tool", "name": name}
 				}
@@ -246,6 +288,10 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 	case "function_call":
 		return convertFunctionCallMessage(msg)
 	case "function_call_output":
+		return convertFunctionCallOutputMessage(msg)
+	case "custom_tool_call":
+		return convertCustomToolCallMessage(msg)
+	case "custom_tool_call_output":
 		return convertFunctionCallOutputMessage(msg)
 	case "reasoning":
 		return convertReasoningMessage(msg)
@@ -408,6 +454,36 @@ func convertFunctionCallMessage(msg types.InputMessage) *types.AnthropicMessage 
 				ID:    callID,
 				Name:  msg.Name,
 				Input: input,
+			},
+		},
+	}
+}
+
+func convertCustomToolCallMessage(msg types.InputMessage) *types.AnthropicMessage {
+	callID := msg.CallID
+	if callID == "" {
+		callID = msg.ID
+	}
+	if callID == "" {
+		return nil
+	}
+
+	input := msg.Input
+	if input == "" && msg.Arguments != "" {
+		input = msg.Arguments
+	}
+	if input == "" && msg.Content != nil {
+		input = contentToString(msg.Content)
+	}
+
+	return &types.AnthropicMessage{
+		Role: "assistant",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type:  "tool_use",
+				ID:    callID,
+				Name:  msg.Name,
+				Input: map[string]any{"input": input},
 			},
 		},
 	}
@@ -711,9 +787,48 @@ func webSearchAction(input any) any {
 	return action
 }
 
+func customToolSet(customToolNames ...map[string]bool) map[string]bool {
+	if len(customToolNames) == 0 || customToolNames[0] == nil {
+		return map[string]bool{}
+	}
+	return customToolNames[0]
+}
+
+func customToolInput(input any) string {
+	switch v := input.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if raw, ok := v["input"]; ok {
+			return stringifyToolInput(raw)
+		}
+	case map[string]string:
+		if raw, ok := v["input"]; ok {
+			return raw
+		}
+	}
+	return stringifyToolInput(input)
+}
+
+func stringifyToolInput(input any) string {
+	switch v := input.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(b)
+	}
+}
+
 // ToOpenAIResponse converts an Anthropic response to an OpenAI Response API response.
-func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string) *types.OpenAIResponse {
+func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string, customToolNames ...map[string]bool) *types.OpenAIResponse {
 	output := make([]types.OutputItem, 0)
+	customTools := customToolSet(customToolNames...)
 
 	textContent := ""
 	webSearchCalls := make([]types.OutputItem, 0)
@@ -730,15 +845,26 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 			textContent += block.Text
 			annotations = append(annotations, blockCitations(block, startIndex)...)
 		case "tool_use":
-			args, _ := json.Marshal(block.Input)
-			functionCalls = append(functionCalls, types.OutputItem{
-				ID:        fmt.Sprintf("%s_%d", block.ID, i),
-				Type:      "function_call",
-				Status:    "completed",
-				Name:      block.Name,
-				Arguments: string(args),
-				CallID:    block.ID,
-			})
+			if customTools[block.Name] {
+				functionCalls = append(functionCalls, types.OutputItem{
+					ID:     fmt.Sprintf("%s_call_%d", anthropicResp.ID, i),
+					Type:   "custom_tool_call",
+					Status: "completed",
+					Name:   block.Name,
+					Input:  customToolInput(block.Input),
+					CallID: block.ID,
+				})
+			} else {
+				args, _ := json.Marshal(block.Input)
+				functionCalls = append(functionCalls, types.OutputItem{
+					ID:        fmt.Sprintf("%s_call_%d", anthropicResp.ID, i),
+					Type:      "function_call",
+					Status:    "completed",
+					Name:      block.Name,
+					Arguments: string(args),
+					CallID:    block.ID,
+				})
+			}
 		case "server_tool_use":
 			if block.Name == "web_search" {
 				webSearchCalls = append(webSearchCalls, types.OutputItem{
