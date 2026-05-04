@@ -265,9 +265,16 @@ func TestConvertStreamEventMapsServerWebSearchWithoutFunctionCall(t *testing.T) 
 			Name: "web_search",
 		},
 	}, "claude-test", state)
+	if len(added) != 2 {
+		t.Fatalf("len(added) = %d, want output_item.added and web_search_call.in_progress", len(added))
+	}
 	addedItem := decodeEvent(t, added[0])["item"].(map[string]any)
 	if addedItem["type"] != "web_search_call" {
 		t.Fatalf("added item type = %#v, want web_search_call", addedItem["type"])
+	}
+	inProgress := decodeEvent(t, added[1])
+	if inProgress["type"] != "response.web_search_call.in_progress" || inProgress["item_id"] != "srvtoolu_1" {
+		t.Fatalf("in-progress event = %#v, want web_search_call.in_progress for srvtoolu_1", inProgress)
 	}
 
 	delta := convertStreamEvent(&types.AnthropicStreamEvent{
@@ -371,6 +378,40 @@ func TestMessagesURLTrimsTrailingSlash(t *testing.T) {
 	h := &Handler{AnthropicURL: "https://api.anthropic.com/"}
 	if got := h.messagesURL(); got != "https://api.anthropic.com/v1/messages" {
 		t.Fatalf("messagesURL() = %q, want trimmed URL", got)
+	}
+}
+
+func TestNewHandlerDoesNotUseTotalClientTimeout(t *testing.T) {
+	h := New("https://api.anthropic.com", "key", "claude-test")
+	if h.HTTPClient.Timeout != 0 {
+		t.Fatalf("HTTPClient.Timeout = %v, want no total timeout for streaming", h.HTTPClient.Timeout)
+	}
+}
+
+func TestStreamErrorEventsEmitFailedResponseAndError(t *testing.T) {
+	state := newStreamState()
+	state.responseID = "resp_1"
+	events := streamErrorEvents(state, "claude-test", "stream_error", "upstream interrupted")
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want response.failed and error", len(events))
+	}
+
+	failed := decodeEvent(t, events[0])
+	if failed["type"] != "response.failed" {
+		t.Fatalf("first event type = %#v, want response.failed", failed["type"])
+	}
+	response := failed["response"].(map[string]any)
+	if response["status"] != "failed" {
+		t.Fatalf("failed response = %#v, want failed status", response)
+	}
+	errObj := response["error"].(map[string]any)
+	if errObj["code"] != "stream_error" || errObj["message"] != "upstream interrupted" {
+		t.Fatalf("response error = %#v, want stream_error message", errObj)
+	}
+
+	errEvent := decodeEvent(t, events[1])
+	if errEvent["type"] != "error" || errEvent["code"] != "stream_error" {
+		t.Fatalf("error event = %#v, want top-level error event", errEvent)
 	}
 }
 

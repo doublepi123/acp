@@ -59,11 +59,11 @@ func runServe() {
 
 	addr := cfg.Host + ":" + cfg.Port
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 10 * time.Minute,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -147,12 +147,15 @@ func runCodex() {
 		codexDone <- cmd.Run()
 	}()
 
+	exitCode := 0
 	select {
 	case err := <-codexDone:
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
-				log.Printf("codex exited with code %d", exitErr.ExitCode())
+				exitCode = exitErr.ExitCode()
+				log.Printf("codex exited with code %d", exitCode)
 			} else {
+				exitCode = 1
 				log.Printf("codex error: %v", err)
 			}
 		}
@@ -171,6 +174,9 @@ func runCodex() {
 		log.Printf("proxy shutdown error: %v", err)
 	}
 	log.Printf("acp proxy stopped")
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func codexArgsWithProxy(args []string, model string, port int) []string {

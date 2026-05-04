@@ -33,9 +33,7 @@ func New(anthropicURL, anthropicKey, defaultModel string) *Handler {
 		AnthropicURL: anthropicURL,
 		AnthropicKey: anthropicKey,
 		DefaultModel: defaultModel,
-		HTTPClient: &http.Client{
-			Timeout: 10 * time.Minute,
-		},
+		HTTPClient:   &http.Client{},
 	}
 }
 
@@ -206,26 +204,26 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 
 		// Stop processing on error event from Anthropic
 		if event.Type == "error" {
-			errResp := map[string]any{
-				"type":  "error",
-				"error": event.Error,
+			code := "anthropic_error"
+			message := "Anthropic stream error"
+			if event.Error != nil {
+				if event.Error.Type != "" {
+					code = event.Error.Type
+				}
+				if event.Error.Message != "" {
+					message = event.Error.Message
+				}
 			}
-			fmt.Fprintf(w, "data: %s\n\n", state.event(errResp))
-			flusher.Flush()
+			writeStreamEvents(w, flusher, streamErrorEvents(state, model, code, message))
 			break
 		}
 
-		for _, sseEvent := range convertStreamEvent(&event, model, state) {
-			if sseEvent == "" {
-				continue
-			}
-			fmt.Fprintf(w, "data: %s\n\n", sseEvent)
-			flusher.Flush()
-		}
+		writeStreamEvents(w, flusher, convertStreamEvent(&event, model, state))
 	}
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Scanner error: %v", err)
+		writeStreamEvents(w, flusher, streamErrorEvents(state, model, "stream_error", err.Error()))
 	}
 
 	fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -308,6 +306,45 @@ func (s *streamState) event(fields map[string]any) string {
 	s.seq++
 	b, _ := json.Marshal(fields)
 	return string(b)
+}
+
+func writeStreamEvents(w http.ResponseWriter, flusher http.Flusher, events []string) {
+	for _, sseEvent := range events {
+		if sseEvent == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", sseEvent); err != nil {
+			log.Printf("Failed to write stream event: %v", err)
+			return
+		}
+		flusher.Flush()
+	}
+}
+
+func streamErrorEvents(state *streamState, model, code, message string) []string {
+	failed := map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"id":         state.responseID,
+			"object":     "response",
+			"created_at": state.createdAt,
+			"status":     "failed",
+			"model":      model,
+			"output":     state.output,
+			"error": map[string]any{
+				"code":    code,
+				"message": message,
+			},
+			"incomplete_details": nil,
+		},
+	}
+	errEvent := map[string]any{
+		"type":    "error",
+		"code":    code,
+		"message": message,
+		"param":   nil,
+	}
+	return []string{state.event(failed), state.event(errEvent)}
 }
 
 func streamWebSearchAction(args string) map[string]any {
@@ -478,7 +515,13 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 					"action": map[string]any{"type": "search"},
 				},
 			}
-			return []string{state.event(resp)}
+			inProgress := map[string]any{
+				"type":         "response.web_search_call.in_progress",
+				"response_id":  state.responseID,
+				"output_index": state.outputIndices[idx],
+				"item_id":      itemID,
+			}
+			return []string{state.event(resp), state.event(inProgress)}
 		case "web_search_tool_result", "web_search_results":
 			toolUseID := event.ContentBlock.ToolUseID
 			searchIdx, ok := state.callIndex[toolUseID]
