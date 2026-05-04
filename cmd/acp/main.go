@@ -103,21 +103,32 @@ func runCodex() {
 	mux.HandleFunc("/health", h.HandleHealth)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	// Start proxy in background
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("acp proxy started on http://%s (model: %s)", addr, cfg.DefaultModel)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("proxy error: %v", err)
-		}
+		serverErr <- srv.ListenAndServe()
 	}()
 
 	// Wait for proxy to be ready
 	if !waitForReady(port, 5*time.Second) {
+		select {
+		case err := <-serverErr:
+			if err != nil && err != http.ErrServerClosed {
+				log.Fatalf("proxy failed to start: %v", err)
+			}
+		default:
+		}
 		log.Fatal("proxy failed to start in time")
 	}
-
 	codexHome, cleanupCodexHome, err := prepareIsolatedCodexHome()
 	if err != nil {
 		log.Fatalf("failed to prepare Codex home: %v", err)
@@ -164,7 +175,13 @@ func runCodex() {
 		if cmd.Process != nil {
 			cmd.Process.Signal(sig)
 		}
-		<-codexDone
+		select {
+		case <-codexDone:
+		case <-time.After(30 * time.Second):
+			log.Printf("codex did not exit in time, killing...")
+			cmd.Process.Kill()
+			<-codexDone
+		}
 	}
 
 	// Shutdown proxy
@@ -216,7 +233,7 @@ func hasCodexModelArg(args []string) bool {
 		if strings.HasPrefix(arg, "--model=") {
 			return true
 		}
-		if strings.HasPrefix(arg, "-m") && arg != "-m" {
+		if strings.HasPrefix(arg, "-m=") {
 			return true
 		}
 	}

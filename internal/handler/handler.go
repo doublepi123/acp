@@ -94,6 +94,8 @@ func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, an
 		writeError(w, http.StatusInternalServerError, "failed to marshal request")
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.messagesURL(), bytes.NewReader(reqBody))
 	if err != nil {

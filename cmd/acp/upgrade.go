@@ -321,21 +321,25 @@ func replaceExecutable(targetPath string, data []byte) error {
 		return fmt.Errorf("creating temporary binary in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	cleanup := func() { os.Remove(tmpPath) }
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
+		cleanup()
 		return fmt.Errorf("writing temporary binary: %w", err)
 	}
 	if err := tmp.Chmod(info.Mode().Perm() | 0o755); err != nil {
 		tmp.Close()
+		cleanup()
 		return fmt.Errorf("marking temporary binary executable: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
+		cleanup()
 		return fmt.Errorf("closing temporary binary: %w", err)
 	}
 
 	if err := os.Rename(tmpPath, targetPath); err != nil {
+		cleanup()
 		return fmt.Errorf("replacing %s: %w", targetPath, err)
 	}
 
