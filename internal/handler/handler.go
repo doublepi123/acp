@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +11,13 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lcy/anthropic-openai-proxy/internal/translate"
 	"github.com/lcy/anthropic-openai-proxy/internal/types"
 )
+
+const maxRequestBodyBytes = 64 << 20
 
 // Handler handles HTTP requests, proxying OpenAI Response API to Anthropic.
 type Handler struct {
@@ -42,7 +46,7 @@ func (h *Handler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body")
 		return
@@ -66,9 +70,9 @@ func (h *Handler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if openaiReq.Stream {
-		h.handleStream(w, anthropicReq, openaiReq.Model)
+		h.handleStream(r.Context(), w, anthropicReq, openaiReq.Model)
 	} else {
-		h.handleNonStream(w, anthropicReq, openaiReq.Model)
+		h.handleNonStream(r.Context(), w, anthropicReq, openaiReq.Model)
 	}
 }
 
@@ -82,14 +86,18 @@ func (h *Handler) resolveModel(model string) string {
 	return model
 }
 
-func (h *Handler) handleNonStream(w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {
+func (h *Handler) messagesURL() string {
+	return strings.TrimRight(h.AnthropicURL, "/") + "/v1/messages"
+}
+
+func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to marshal request")
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, h.AnthropicURL+"/v1/messages", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.messagesURL(), bytes.NewReader(reqBody))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create request")
 		return
@@ -132,14 +140,14 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, anthropicReq *types.Ant
 	json.NewEncoder(w).Encode(openaiResp)
 }
 
-func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {
+func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to marshal request")
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, h.AnthropicURL+"/v1/messages", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.messagesURL(), bytes.NewReader(reqBody))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create request")
 		return
@@ -179,11 +187,9 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 
-	msgID := fmt.Sprintf("resp_%d", time.Now().UnixNano())
-	blockTypes := make(map[int]string)
-	blockNames := make(map[int]string)
+	state := newStreamState()
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -198,13 +204,13 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 			continue
 		}
 
-		sseEvent := convertStreamEvent(&event, model, msgID, blockTypes, blockNames)
-		if sseEvent == "" {
-			continue
+		for _, sseEvent := range convertStreamEvent(&event, model, state) {
+			if sseEvent == "" {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", sseEvent)
+			flusher.Flush()
 		}
-
-		fmt.Fprintf(w, "data: %s\n\n", sseEvent)
-		flusher.Flush()
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -215,158 +221,331 @@ func (h *Handler) handleStream(w http.ResponseWriter, anthropicReq *types.Anthro
 	flusher.Flush()
 }
 
-func convertStreamEvent(event *types.AnthropicStreamEvent, model, msgID string, blockTypes map[int]string, blockNames map[int]string) string {
+type streamState struct {
+	responseID string
+	createdAt  int64
+	seq        int64
+	blockTypes map[int]string
+	blockNames map[int]string
+	blockIDs   map[int]string
+	callIDs    map[int]string
+	callIndex  map[string]int
+	text       map[int]string
+	args       map[int]string
+	citations  map[int]int
+	output     []any
+}
+
+func newStreamState() *streamState {
+	now := time.Now()
+	fallbackID := fmt.Sprintf("resp_%d", now.UnixNano())
+	return &streamState{
+		responseID: fallbackID,
+		createdAt:  now.Unix(),
+		blockTypes: make(map[int]string),
+		blockNames: make(map[int]string),
+		blockIDs:   make(map[int]string),
+		callIDs:    make(map[int]string),
+		callIndex:  make(map[string]int),
+		text:       make(map[int]string),
+		args:       make(map[int]string),
+		citations:  make(map[int]int),
+		output:     []any{},
+	}
+}
+
+func (s *streamState) itemID(idx int, kind string) string {
+	if id := s.blockIDs[idx]; id != "" {
+		return id
+	}
+	id := fmt.Sprintf("%s_%s_%d", s.responseID, kind, idx)
+	s.blockIDs[idx] = id
+	return id
+}
+
+func indexValue(index *int) int {
+	if index == nil {
+		return 0
+	}
+	return *index
+}
+
+func (s *streamState) event(fields map[string]any) string {
+	fields["sequence_number"] = s.seq
+	s.seq++
+	b, _ := json.Marshal(fields)
+	return string(b)
+}
+
+func streamWebSearchAction(args string) map[string]any {
+	action := map[string]any{"type": "search"}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return action
+	}
+	if query, _ := input["query"].(string); query != "" {
+		action["query"] = query
+		action["queries"] = []string{query}
+	}
+	return action
+}
+
+func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *streamState) []string {
 	switch event.Type {
 	case "message_start":
+		if event.Message != nil && event.Message.ID != "" {
+			state.responseID = event.Message.ID
+		}
 		resp := map[string]any{
 			"type": "response.created",
 			"response": map[string]any{
-				"id":         event.Message.ID,
+				"id":         state.responseID,
 				"object":     "response",
-				"created_at": time.Now().Unix(),
+				"created_at": state.createdAt,
 				"status":     "in_progress",
 				"model":      model,
 				"output":     []any{},
 			},
 		}
-		b, _ := json.Marshal(resp)
-		return string(b)
+		return []string{state.event(resp)}
 
 	case "content_block_start":
 		if event.ContentBlock == nil || event.Index == nil {
-			return ""
+			return nil
 		}
 		idx := *event.Index
-		blockTypes[idx] = event.ContentBlock.Type
-		blockNames[idx] = event.ContentBlock.Name
+		state.blockTypes[idx] = event.ContentBlock.Type
+		state.blockNames[idx] = event.ContentBlock.Name
 
 		switch event.ContentBlock.Type {
 		case "text":
+			itemID := state.itemID(idx, "msg")
 			resp := map[string]any{
 				"type":         "response.output_item.added",
+				"response_id":  state.responseID,
 				"output_index": event.Index,
 				"item": map[string]any{
-					"id":      fmt.Sprintf("%s_msg_%d", msgID, idx),
+					"id":      itemID,
 					"type":    "message",
 					"role":    "assistant",
 					"status":  "in_progress",
 					"content": []any{},
 				},
 			}
-			b, _ := json.Marshal(resp)
-			return string(b)
+			return []string{state.event(resp)}
 		case "tool_use":
+			itemID := state.itemID(idx, "call")
+			state.callIDs[idx] = event.ContentBlock.ID
+			state.callIndex[event.ContentBlock.ID] = idx
 			resp := map[string]any{
 				"type":         "response.output_item.added",
+				"response_id":  state.responseID,
 				"output_index": event.Index,
 				"item": map[string]any{
-					"id":      fmt.Sprintf("%s_call_%d", msgID, idx),
-					"type":    "function_call",
-					"name":    event.ContentBlock.Name,
-					"call_id": event.ContentBlock.ID,
-					"status":  "in_progress",
+					"id":        itemID,
+					"type":      "function_call",
+					"name":      event.ContentBlock.Name,
+					"call_id":   event.ContentBlock.ID,
+					"arguments": "",
+					"status":    "in_progress",
 				},
 			}
-			b, _ := json.Marshal(resp)
-			return string(b)
+			return []string{state.event(resp)}
 		case "server_tool_use":
+			itemID := state.itemID(idx, "web_search")
+			if event.ContentBlock.ID != "" {
+				itemID = event.ContentBlock.ID
+				state.blockIDs[idx] = itemID
+			}
+			state.callIDs[idx] = event.ContentBlock.ID
+			state.callIndex[event.ContentBlock.ID] = idx
 			resp := map[string]any{
 				"type":         "response.output_item.added",
+				"response_id":  state.responseID,
 				"output_index": event.Index,
 				"item": map[string]any{
-					"id":      fmt.Sprintf("%s_call_%d", msgID, idx),
-					"type":    "function_call",
-					"name":    event.ContentBlock.Name,
-					"call_id": event.ContentBlock.ID,
-					"status":  "in_progress",
+					"id":     itemID,
+					"type":   "web_search_call",
+					"status": "in_progress",
+					"action": map[string]any{"type": "search"},
 				},
 			}
-			b, _ := json.Marshal(resp)
-			return string(b)
-		case "web_search_results":
-			// Web search results block - no client-side item needed
-			return ""
+			return []string{state.event(resp)}
+		case "web_search_tool_result", "web_search_results":
+			toolUseID := event.ContentBlock.ToolUseID
+			searchIdx, ok := state.callIndex[toolUseID]
+			if !ok {
+				return nil
+			}
+			itemID := state.itemID(searchIdx, "web_search")
+			item := map[string]any{
+				"id":     itemID,
+				"type":   "web_search_call",
+				"status": "completed",
+				"action": streamWebSearchAction(state.args[searchIdx]),
+			}
+			state.output = append(state.output, item)
+			return []string{
+				state.event(map[string]any{
+					"type":         "response.web_search_call.completed",
+					"response_id":  state.responseID,
+					"output_index": searchIdx,
+					"item_id":      itemID,
+				}),
+				state.event(map[string]any{
+					"type":         "response.output_item.done",
+					"response_id":  state.responseID,
+					"output_index": searchIdx,
+					"item":         item,
+				}),
+			}
 		}
 
 	case "content_block_delta":
 		if event.Delta == nil {
-			return ""
+			return nil
 		}
+		idx := indexValue(event.Index)
 		switch event.Delta.Type {
 		case "text_delta":
+			state.text[idx] += event.Delta.Text
 			resp := map[string]any{
 				"type":          "response.output_text.delta",
+				"response_id":   state.responseID,
 				"output_index":  event.Index,
+				"item_id":       state.itemID(idx, "msg"),
 				"content_index": 0,
 				"delta":         event.Delta.Text,
 			}
-			b, _ := json.Marshal(resp)
-			return string(b)
+			return []string{state.event(resp)}
 		case "input_json_delta":
+			state.args[idx] += event.Delta.PartialJSON
+			if state.blockTypes[idx] == "server_tool_use" {
+				return nil
+			}
 			resp := map[string]any{
 				"type":         "response.function_call_arguments.delta",
+				"response_id":  state.responseID,
 				"output_index": event.Index,
+				"item_id":      state.itemID(idx, "call"),
 				"delta":        event.Delta.PartialJSON,
 			}
-			b, _ := json.Marshal(resp)
-			return string(b)
+			return []string{state.event(resp)}
+		case "citations_delta":
+			if event.Delta.Citation == nil {
+				return nil
+			}
+			citation := event.Delta.Citation
+			url := citation.URL
+			if url == "" {
+				url = citation.Source
+			}
+			if url == "" {
+				return nil
+			}
+			annotationIndex := state.citations[idx]
+			state.citations[idx]++
+			resp := map[string]any{
+				"type":             "response.output_text.annotation.added",
+				"response_id":      state.responseID,
+				"output_index":     event.Index,
+				"item_id":          state.itemID(idx, "msg"),
+				"content_index":    0,
+				"annotation_index": annotationIndex,
+				"annotation": map[string]any{
+					"type":        "url_citation",
+					"start_index": 0,
+					"end_index":   utf8.RuneCountInString(state.text[idx]),
+					"url":         url,
+					"title":       citation.Title,
+				},
+			}
+			return []string{state.event(resp)}
 		}
 
 	case "content_block_stop":
 		if event.Index == nil {
-			return ""
+			return nil
 		}
 		idx := *event.Index
+		itemID := state.itemID(idx, state.blockTypes[idx])
 		item := map[string]any{
-			"id":     fmt.Sprintf("%s_%s_%d", msgID, blockTypes[idx], idx),
+			"id":     itemID,
 			"status": "completed",
 		}
-		switch blockTypes[idx] {
+		var events []string
+		switch state.blockTypes[idx] {
 		case "text":
 			item["type"] = "message"
 			item["role"] = "assistant"
+			item["content"] = []map[string]any{
+				{
+					"type": "output_text",
+					"text": state.text[idx],
+				},
+			}
+			state.output = append(state.output, item)
 		case "tool_use":
 			item["type"] = "function_call"
-			item["name"] = blockNames[idx]
+			item["name"] = state.blockNames[idx]
+			item["call_id"] = state.callIDs[idx]
+			item["arguments"] = state.args[idx]
+			state.output = append(state.output, item)
+			done := map[string]any{
+				"type":         "response.function_call_arguments.done",
+				"response_id":  state.responseID,
+				"output_index": event.Index,
+				"item_id":      itemID,
+				"call_id":      state.callIDs[idx],
+				"name":         state.blockNames[idx],
+				"arguments":    state.args[idx],
+			}
+			events = append(events, state.event(done))
 		case "server_tool_use":
-			item["type"] = "function_call"
-			item["name"] = blockNames[idx]
-		case "web_search_results":
-			return ""
+			searching := map[string]any{
+				"type":         "response.web_search_call.searching",
+				"response_id":  state.responseID,
+				"output_index": event.Index,
+				"item_id":      itemID,
+			}
+			return []string{state.event(searching)}
+		case "web_search_tool_result", "web_search_results":
+			return nil
 		}
 		resp := map[string]any{
 			"type":         "response.output_item.done",
+			"response_id":  state.responseID,
 			"output_index": event.Index,
 			"item":         item,
 		}
-		b, _ := json.Marshal(resp)
-		return string(b)
+		events = append(events, state.event(resp))
+		return events
 
 	case "message_delta":
 		resp := map[string]any{
 			"type": "response.completed",
 			"response": map[string]any{
-				"id":     msgID,
+				"id":     state.responseID,
 				"object": "response",
 				"status": "completed",
+				"model":  model,
+				"output": state.output,
 			},
 		}
-		b, _ := json.Marshal(resp)
-		return string(b)
+		return []string{state.event(resp)}
 
 	case "message_stop":
-		return ""
+		return nil
 
 	case "error":
 		resp := map[string]any{
 			"type":  "error",
 			"error": event.Error,
 		}
-		b, _ := json.Marshal(resp)
-		return string(b)
+		return []string{state.event(resp)}
 	}
 
-	return ""
+	return nil
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

@@ -26,6 +26,7 @@ type AnthropicMessage struct {
 type AnthropicContentBlock struct {
 	Type             string                     `json:"type"`
 	Text             string                     `json:"text,omitempty"`
+	Citations        []AnthropicCitation        `json:"citations,omitempty"`
 	Source           *AnthropicSource           `json:"source,omitempty"`
 	ID               string                     `json:"id,omitempty"`
 	Name             string                     `json:"name,omitempty"`
@@ -33,6 +34,16 @@ type AnthropicContentBlock struct {
 	Content          any                        `json:"content,omitempty"`
 	ToolUseID        string                     `json:"tool_use_id,omitempty"`
 	WebSearchResults *AnthropicWebSearchResults `json:"web_search_results,omitempty"`
+}
+
+// AnthropicCitation represents a citation attached to a text block.
+type AnthropicCitation struct {
+	Type           string `json:"type"`
+	URL            string `json:"url,omitempty"`
+	Title          string `json:"title,omitempty"`
+	CitedText      string `json:"cited_text,omitempty"`
+	EncryptedIndex string `json:"encrypted_index,omitempty"`
+	Source         string `json:"source,omitempty"`
 }
 
 // AnthropicWebSearchResults holds web search results from Anthropic.
@@ -43,8 +54,9 @@ type AnthropicWebSearchResults struct {
 // AnthropicSource represents an image source.
 type AnthropicSource struct {
 	Type      string `json:"type"`
-	MediaType string `json:"media_type"`
-	Data      string `json:"data"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // AnthropicTool represents a tool definition for Anthropic.
@@ -90,9 +102,10 @@ type AnthropicStreamEvent struct {
 
 // AnthropicDelta represents a delta update in streaming.
 type AnthropicDelta struct {
-	Type        string `json:"type,omitempty"`
-	Text        string `json:"text,omitempty"`
-	PartialJSON string `json:"partial_json,omitempty"`
+	Type        string             `json:"type,omitempty"`
+	Text        string             `json:"text,omitempty"`
+	PartialJSON string             `json:"partial_json,omitempty"`
+	Citation    *AnthropicCitation `json:"citation,omitempty"`
 }
 
 // AnthropicError represents an Anthropic API error.

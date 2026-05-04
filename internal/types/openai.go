@@ -17,11 +17,16 @@ type OpenAIResponseRequest struct {
 
 // InputMessage represents a message in the input field when it's an array.
 type InputMessage struct {
-	Role    string     `json:"role"`
-	Content any        `json:"content"`
-	Name    string     `json:"name,omitempty"`
-	CallID  string     `json:"tool_call_id,omitempty"`
-	Calls   []ToolCall `json:"tool_calls,omitempty"`
+	Type      string     `json:"type,omitempty"`
+	ID        string     `json:"id,omitempty"`
+	Role      string     `json:"role"`
+	Content   any        `json:"content"`
+	Name      string     `json:"name,omitempty"`
+	Arguments string     `json:"arguments,omitempty"`
+	CallID    string     `json:"call_id,omitempty"`
+	ToolID    string     `json:"tool_call_id,omitempty"`
+	Output    any        `json:"output,omitempty"`
+	Calls     []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // Tool represents a tool definition.
@@ -47,10 +52,17 @@ type FunctionTool struct {
 
 // ToolCall represents a tool call from the model.
 type ToolCall struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	ID        string            `json:"id"`
+	Type      string            `json:"type"`
+	Name      string            `json:"name"`
+	Arguments string            `json:"arguments"`
+	Function  *FunctionCallData `json:"function,omitempty"`
+}
+
+// FunctionCallData represents nested function call data.
+type FunctionCallData struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // OpenAIResponse represents the OpenAI Response API response.
@@ -73,6 +85,7 @@ type OutputItem struct {
 	Status    string `json:"status,omitempty"`
 	Role      string `json:"role,omitempty"`
 	Content   any    `json:"content,omitempty"`
+	Action    any    `json:"action,omitempty"`
 	Name      string `json:"name,omitempty"`
 	CallID    string `json:"call_id,omitempty"`
 	Arguments string `json:"arguments,omitempty"`

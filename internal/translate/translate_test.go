@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/lcy/anthropic-openai-proxy/internal/types"
@@ -91,5 +92,197 @@ func TestToAnthropicRequestRejectsFunctionToolWithoutName(t *testing.T) {
 
 	if _, err := ToAnthropicRequest(req); err == nil {
 		t.Fatal("ToAnthropicRequest returned nil error, want missing name error")
+	}
+}
+
+func TestToAnthropicRequestConvertsResponsesInputBlocksAndFunctionOutput(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "describe this"},
+					map[string]any{"type": "input_image", "image_url": "https://example.com/a.png"},
+					map[string]any{"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_1",
+				"call_id":   "call_1",
+				"name":      "lookup",
+				"arguments": `{"q":"weather"}`,
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "sunny",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(got.Messages))
+	}
+
+	userBlocks, ok := got.Messages[0].Content.([]types.AnthropicContentBlock)
+	if !ok {
+		t.Fatalf("user content type = %T, want []AnthropicContentBlock", got.Messages[0].Content)
+	}
+	if userBlocks[0].Type != "text" || userBlocks[0].Text != "describe this" {
+		t.Fatalf("first block = %#v, want input_text converted to text", userBlocks[0])
+	}
+	if userBlocks[1].Source == nil || userBlocks[1].Source.Type != "url" || userBlocks[1].Source.URL != "https://example.com/a.png" {
+		t.Fatalf("url image block = %#v, want Anthropic url source", userBlocks[1])
+	}
+	if userBlocks[2].Source == nil || userBlocks[2].Source.Type != "base64" || userBlocks[2].Source.MediaType != "image/png" || userBlocks[2].Source.Data != "abc123" {
+		t.Fatalf("data image block = %#v, want parsed base64 source", userBlocks[2])
+	}
+
+	callBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	if callBlocks[0].Type != "tool_use" || callBlocks[0].ID != "call_1" || callBlocks[0].Name != "lookup" {
+		t.Fatalf("function_call block = %#v, want tool_use with call id/name", callBlocks[0])
+	}
+	input, ok := callBlocks[0].Input.(map[string]any)
+	if !ok || input["q"] != "weather" {
+		t.Fatalf("tool input = %#v, want parsed arguments", callBlocks[0].Input)
+	}
+
+	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
+	if resultBlocks[0].Type != "tool_result" || resultBlocks[0].ToolUseID != "call_1" || resultBlocks[0].Content != "sunny" {
+		t.Fatalf("function_call_output block = %#v, want tool_result", resultBlocks[0])
+	}
+}
+
+func TestToAnthropicRequestHandlesMalformedToolChoice(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model:      "claude-sonnet-4-20250514",
+		Input:      "hello",
+		ToolChoice: map[string]any{"type": "function"},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if got.ToolChoice != nil {
+		t.Fatalf("ToolChoice = %#v, want nil for malformed input", got.ToolChoice)
+	}
+}
+
+func TestToAnthropicRequestConvertsResponsesFunctionToolChoice(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model:      "claude-sonnet-4-20250514",
+		Input:      "hello",
+		ToolChoice: map[string]any{"type": "function", "name": "lookup"},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	want := map[string]any{"type": "tool", "name": "lookup"}
+	gotChoice, ok := got.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("ToolChoice = %T, want map[string]any", got.ToolChoice)
+	}
+	if gotChoice["type"] != want["type"] || gotChoice["name"] != want["name"] {
+		t.Fatalf("ToolChoice = %#v, want %#v", gotChoice, want)
+	}
+}
+
+func TestToAnthropicRequestConvertsNestedChatCompletionToolCalls(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"role":    "assistant",
+				"content": "checking",
+				"tool_calls": []any{
+					map[string]any{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "lookup",
+							"arguments": `{"q":"x"}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	blocks := got.Messages[0].Content.([]types.AnthropicContentBlock)
+	if len(blocks) != 2 {
+		t.Fatalf("len(blocks) = %d, want text plus tool_use", len(blocks))
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "checking" {
+		t.Fatalf("text block = %#v, want assistant text preserved", blocks[0])
+	}
+	if blocks[1].Type != "tool_use" || blocks[1].Name != "lookup" {
+		t.Fatalf("tool block = %#v, want nested function call converted", blocks[1])
+	}
+	args, err := json.Marshal(blocks[1].Input)
+	if err != nil {
+		t.Fatalf("marshal input: %v", err)
+	}
+	if string(args) != `{"q":"x"}` {
+		t.Fatalf("tool input = %s, want parsed arguments", string(args))
+	}
+}
+
+func TestToOpenAIResponseConvertsWebSearchCallAndCitations(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID: "msg_1",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type:  "server_tool_use",
+				ID:    "srvtoolu_1",
+				Name:  "web_search",
+				Input: map[string]any{"query": "weather"},
+			},
+			{
+				Type:      "web_search_tool_result",
+				ToolUseID: "srvtoolu_1",
+				Content: []any{
+					map[string]any{"type": "web_search_result", "url": "https://example.com", "title": "Example"},
+				},
+			},
+			{
+				Type: "text",
+				Text: "It is sunny.",
+				Citations: []types.AnthropicCitation{
+					{Type: "web_search_result_location", URL: "https://example.com", Title: "Example"},
+				},
+			},
+		},
+	}
+
+	got := ToOpenAIResponse(resp, "claude-test")
+	if len(got.Output) != 2 {
+		t.Fatalf("len(Output) = %d, want web_search_call plus message", len(got.Output))
+	}
+	if got.Output[0].Type != "web_search_call" || got.Output[0].ID != "srvtoolu_1" || got.Output[0].Status != "completed" {
+		t.Fatalf("web search item = %#v, want completed web_search_call", got.Output[0])
+	}
+	action := got.Output[0].Action.(map[string]any)
+	if action["type"] != "search" || action["query"] != "weather" {
+		t.Fatalf("web search action = %#v, want search query", action)
+	}
+
+	content := got.Output[1].Content.([]map[string]any)
+	annotations := content[0]["annotations"].([]map[string]any)
+	if len(annotations) != 1 || annotations[0]["url"] != "https://example.com" || annotations[0]["title"] != "Example" {
+		t.Fatalf("annotations = %#v, want url citation", annotations)
 	}
 }
