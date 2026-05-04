@@ -121,6 +121,68 @@ func TestConvertStreamEventAccumulatesFunctionArguments(t *testing.T) {
 	}
 }
 
+func TestConvertStreamEventAccumulatesThinkingAsReasoning(t *testing.T) {
+	state := newStreamState()
+	idx := 0
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	added := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "thinking",
+		},
+	}, "claude-test", state)
+	addedItem := decodeEvent(t, added[0])["item"].(map[string]any)
+	if addedItem["type"] != "reasoning" {
+		t.Fatalf("added item = %#v, want reasoning", addedItem)
+	}
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type:     "thinking_delta",
+			Thinking: "I should use a tool.",
+		},
+	}, "claude-test", state)
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type:      "signature_delta",
+			Signature: "sig_1",
+		},
+	}, "claude-test", state)
+
+	done := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx,
+	}, "claude-test", state)
+	doneItem := decodeEvent(t, done[0])["item"].(map[string]any)
+	if doneItem["type"] != "reasoning" || doneItem["encrypted_content"] != "sig_1" {
+		t.Fatalf("done item = %#v, want completed reasoning with signature", doneItem)
+	}
+	content := doneItem["content"].([]any)[0].(map[string]any)
+	if content["text"] != "I should use a tool." {
+		t.Fatalf("reasoning content = %#v, want thinking text", content)
+	}
+
+	completed := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_delta",
+	}, "claude-test", state)
+	output := decodeEvent(t, completed[0])["response"].(map[string]any)["output"].([]any)
+	if output[0].(map[string]any)["type"] != "reasoning" {
+		t.Fatalf("completed output = %#v, want reasoning item", output)
+	}
+}
+
 func TestConvertStreamEventMapsServerWebSearchWithoutFunctionCall(t *testing.T) {
 	state := newStreamState()
 	idx := 1

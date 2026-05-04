@@ -13,6 +13,7 @@ type AnthropicMessageRequest struct {
 	StopSequences []string           `json:"stop_sequences,omitempty"`
 	Tools         []AnthropicTool    `json:"tools,omitempty"`
 	ToolChoice    any                `json:"tool_choice,omitempty"`
+	Thinking      any                `json:"thinking,omitempty"`
 	Metadata      map[string]any     `json:"metadata,omitempty"`
 }
 
@@ -26,6 +27,9 @@ type AnthropicMessage struct {
 type AnthropicContentBlock struct {
 	Type             string                     `json:"type"`
 	Text             string                     `json:"text,omitempty"`
+	Thinking         string                     `json:"thinking,omitempty"`
+	Signature        string                     `json:"signature,omitempty"`
+	Data             string                     `json:"data,omitempty"`
 	Citations        []AnthropicCitation        `json:"citations,omitempty"`
 	Source           *AnthropicSource           `json:"source,omitempty"`
 	ID               string                     `json:"id,omitempty"`
@@ -104,6 +108,8 @@ type AnthropicStreamEvent struct {
 type AnthropicDelta struct {
 	Type        string             `json:"type,omitempty"`
 	Text        string             `json:"text,omitempty"`
+	Thinking    string             `json:"thinking,omitempty"`
+	Signature   string             `json:"signature,omitempty"`
 	PartialJSON string             `json:"partial_json,omitempty"`
 	Citation    *AnthropicCitation `json:"citation,omitempty"`
 }

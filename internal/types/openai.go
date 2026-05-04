@@ -11,22 +11,26 @@ type OpenAIResponseRequest struct {
 	Stream        bool           `json:"stream,omitempty"`
 	Tools         []Tool         `json:"tools,omitempty"`
 	ToolChoice    any            `json:"tool_choice,omitempty"`
+	Reasoning     any            `json:"reasoning,omitempty"`
 	ParallelCalls *bool          `json:"parallel_tool_calls,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // InputMessage represents a message in the input field when it's an array.
 type InputMessage struct {
-	Type      string     `json:"type,omitempty"`
-	ID        string     `json:"id,omitempty"`
-	Role      string     `json:"role"`
-	Content   any        `json:"content"`
-	Name      string     `json:"name,omitempty"`
-	Arguments string     `json:"arguments,omitempty"`
-	CallID    string     `json:"call_id,omitempty"`
-	ToolID    string     `json:"tool_call_id,omitempty"`
-	Output    any        `json:"output,omitempty"`
-	Calls     []ToolCall `json:"tool_calls,omitempty"`
+	Type             string     `json:"type,omitempty"`
+	ID               string     `json:"id,omitempty"`
+	Role             string     `json:"role"`
+	Content          any        `json:"content"`
+	Summary          any        `json:"summary,omitempty"`
+	EncryptedContent string     `json:"encrypted_content,omitempty"`
+	Status           string     `json:"status,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	Arguments        string     `json:"arguments,omitempty"`
+	CallID           string     `json:"call_id,omitempty"`
+	ToolID           string     `json:"tool_call_id,omitempty"`
+	Output           any        `json:"output,omitempty"`
+	Calls            []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // Tool represents a tool definition.
@@ -80,15 +84,17 @@ type OpenAIResponse struct {
 
 // OutputItem represents an item in the response output array.
 type OutputItem struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Status    string `json:"status,omitempty"`
-	Role      string `json:"role,omitempty"`
-	Content   any    `json:"content,omitempty"`
-	Action    any    `json:"action,omitempty"`
-	Name      string `json:"name,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	ID               string `json:"id"`
+	Type             string `json:"type"`
+	Status           string `json:"status,omitempty"`
+	Role             string `json:"role,omitempty"`
+	Content          any    `json:"content,omitempty"`
+	Summary          any    `json:"summary,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	Action           any    `json:"action,omitempty"`
+	Name             string `json:"name,omitempty"`
+	CallID           string `json:"call_id,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
 }
 
 // Usage represents token usage.

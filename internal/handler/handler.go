@@ -231,6 +231,8 @@ type streamState struct {
 	callIDs    map[int]string
 	callIndex  map[string]int
 	text       map[int]string
+	thinking   map[int]string
+	signatures map[int]string
 	args       map[int]string
 	citations  map[int]int
 	output     []any
@@ -248,6 +250,8 @@ func newStreamState() *streamState {
 		callIDs:    make(map[int]string),
 		callIndex:  make(map[string]int),
 		text:       make(map[int]string),
+		thinking:   make(map[int]string),
+		signatures: make(map[int]string),
 		args:       make(map[int]string),
 		citations:  make(map[int]int),
 		output:     []any{},
@@ -318,6 +322,29 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		state.blockNames[idx] = event.ContentBlock.Name
 
 		switch event.ContentBlock.Type {
+		case "thinking", "redacted_thinking":
+			itemID := state.itemID(idx, "reasoning")
+			if event.ContentBlock.Thinking != "" {
+				state.thinking[idx] = event.ContentBlock.Thinking
+			}
+			if event.ContentBlock.Signature != "" {
+				state.signatures[idx] = event.ContentBlock.Signature
+			}
+			if event.ContentBlock.Data != "" {
+				state.signatures[idx] = event.ContentBlock.Data
+			}
+			resp := map[string]any{
+				"type":         "response.output_item.added",
+				"response_id":  state.responseID,
+				"output_index": event.Index,
+				"item": map[string]any{
+					"id":      itemID,
+					"type":    "reasoning",
+					"status":  "in_progress",
+					"summary": []any{},
+				},
+			}
+			return []string{state.event(resp)}
 		case "text":
 			itemID := state.itemID(idx, "msg")
 			resp := map[string]any{
@@ -407,6 +434,12 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		}
 		idx := indexValue(event.Index)
 		switch event.Delta.Type {
+		case "thinking_delta":
+			state.thinking[idx] += event.Delta.Thinking
+			return nil
+		case "signature_delta":
+			state.signatures[idx] = event.Delta.Signature
+			return nil
 		case "text_delta":
 			state.text[idx] += event.Delta.Text
 			resp := map[string]any{
@@ -475,6 +508,30 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		}
 		var events []string
 		switch state.blockTypes[idx] {
+		case "thinking":
+			item["type"] = "reasoning"
+			item["content"] = []map[string]any{
+				{
+					"type": "reasoning_text",
+					"text": state.thinking[idx],
+				},
+			}
+			item["summary"] = []map[string]any{
+				{
+					"type": "summary_text",
+					"text": state.thinking[idx],
+				},
+			}
+			if state.signatures[idx] != "" {
+				item["encrypted_content"] = state.signatures[idx]
+			}
+			state.output = append(state.output, item)
+		case "redacted_thinking":
+			item["type"] = "reasoning"
+			if state.signatures[idx] != "" {
+				item["encrypted_content"] = state.signatures[idx]
+			}
+			state.output = append(state.output, item)
 		case "text":
 			item["type"] = "message"
 			item["role"] = "assistant"

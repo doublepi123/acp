@@ -160,6 +160,79 @@ func TestToAnthropicRequestConvertsResponsesInputBlocksAndFunctionOutput(t *test
 	}
 }
 
+func TestToAnthropicRequestPreservesReasoningWithFunctionCall(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "look this up"},
+				},
+			},
+			map[string]any{
+				"type":              "reasoning",
+				"id":                "rs_1",
+				"encrypted_content": "sig_1",
+				"content": []any{
+					map[string]any{"type": "reasoning_text", "text": "I should use a tool."},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_1",
+				"call_id":   "call_1",
+				"name":      "lookup",
+				"arguments": `{"q":"weather"}`,
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "sunny",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want user, assistant, tool result", len(got.Messages))
+	}
+	assistantBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	if len(assistantBlocks) != 2 {
+		t.Fatalf("len(assistantBlocks) = %d, want thinking plus tool_use", len(assistantBlocks))
+	}
+	if assistantBlocks[0].Type != "thinking" || assistantBlocks[0].Thinking != "I should use a tool." || assistantBlocks[0].Signature != "sig_1" {
+		t.Fatalf("thinking block = %#v, want preserved thinking/signature", assistantBlocks[0])
+	}
+	if assistantBlocks[1].Type != "tool_use" || assistantBlocks[1].ID != "call_1" {
+		t.Fatalf("tool block = %#v, want tool_use after thinking", assistantBlocks[1])
+	}
+}
+
+func TestToAnthropicRequestConvertsReasoningConfig(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model:     "claude-sonnet-4-20250514",
+		Input:     "think",
+		MaxTokens: 4096,
+		Reasoning: map[string]any{
+			"effort": "medium",
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	thinking := got.Thinking.(map[string]any)
+	if thinking["type"] != "enabled" || thinking["budget_tokens"] != 1024 {
+		t.Fatalf("Thinking = %#v, want enabled budget", thinking)
+	}
+}
+
 func TestToAnthropicRequestHandlesMalformedToolChoice(t *testing.T) {
 	req := &types.OpenAIResponseRequest{
 		Model:      "claude-sonnet-4-20250514",
@@ -284,5 +357,40 @@ func TestToOpenAIResponseConvertsWebSearchCallAndCitations(t *testing.T) {
 	annotations := content[0]["annotations"].([]map[string]any)
 	if len(annotations) != 1 || annotations[0]["url"] != "https://example.com" || annotations[0]["title"] != "Example" {
 		t.Fatalf("annotations = %#v, want url citation", annotations)
+	}
+}
+
+func TestToOpenAIResponseConvertsThinkingBlocksToReasoning(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID: "msg_1",
+		Content: []types.AnthropicContentBlock{
+			{
+				Type:      "thinking",
+				Thinking:  "I should use a tool.",
+				Signature: "sig_1",
+			},
+			{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "lookup",
+				Input: map[string]any{"q": "weather"},
+			},
+		},
+	}
+
+	got := ToOpenAIResponse(resp, "claude-test")
+	if len(got.Output) != 2 {
+		t.Fatalf("len(Output) = %d, want reasoning plus function_call", len(got.Output))
+	}
+	reasoning := got.Output[0]
+	if reasoning.Type != "reasoning" || reasoning.EncryptedContent != "sig_1" {
+		t.Fatalf("reasoning item = %#v, want encrypted reasoning", reasoning)
+	}
+	content := reasoning.Content.([]map[string]any)
+	if content[0]["text"] != "I should use a tool." {
+		t.Fatalf("reasoning content = %#v, want thinking text", content)
+	}
+	if got.Output[1].Type != "function_call" || got.Output[1].CallID != "call_1" {
+		t.Fatalf("function item = %#v, want function_call after reasoning", got.Output[1])
 	}
 }

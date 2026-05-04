@@ -28,6 +28,10 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 	if openaiReq.TopP != nil {
 		anthropicReq.TopP = openaiReq.TopP
 	}
+	if thinking := convertReasoningConfig(openaiReq.Reasoning, anthropicReq.MaxTokens); thinking != nil {
+		anthropicReq.Thinking = thinking
+		anthropicReq.Temperature = nil
+	}
 
 	// Convert tools
 	if len(openaiReq.Tools) > 0 {
@@ -87,6 +91,25 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 	}
 
 	return anthropicReq, nil
+}
+
+func convertReasoningConfig(reasoning any, maxTokens int) any {
+	if reasoning == nil || maxTokens <= 1024 {
+		return nil
+	}
+	if m, ok := reasoning.(map[string]any); ok {
+		if effort, _ := m["effort"].(string); effort == "none" {
+			return nil
+		}
+	}
+	budget := 1024
+	if maxTokens <= budget {
+		budget = maxTokens - 1
+	}
+	return map[string]any{
+		"type":          "enabled",
+		"budget_tokens": budget,
+	}
 }
 
 func convertToolChoice(tc any) any {
@@ -149,7 +172,7 @@ func convertInput(input any, instructions string) ([]types.AnthropicMessage, str
 			} else {
 				anthropicMsg := convertInputMessage(msg)
 				if anthropicMsg != nil {
-					messages = append(messages, *anthropicMsg)
+					messages = appendOrMergeMessage(messages, *anthropicMsg)
 				}
 			}
 		}
@@ -170,7 +193,7 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 	case "function_call_output":
 		return convertFunctionCallOutputMessage(msg)
 	case "reasoning":
-		return nil
+		return convertReasoningMessage(msg)
 	case "web_search_call":
 		return nil
 	}
@@ -207,6 +230,78 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 	return &types.AnthropicMessage{
 		Role:    role,
 		Content: content,
+	}
+}
+
+func appendOrMergeMessage(messages []types.AnthropicMessage, msg types.AnthropicMessage) []types.AnthropicMessage {
+	if len(messages) == 0 || msg.Role != "assistant" {
+		return append(messages, msg)
+	}
+	last := &messages[len(messages)-1]
+	if last.Role != "assistant" {
+		return append(messages, msg)
+	}
+	last.Content = appendContentBlocks(last.Content, msg.Content)
+	return messages
+}
+
+func appendContentBlocks(left any, right any) []types.AnthropicContentBlock {
+	blocks := contentBlocksFromAny(left)
+	blocks = append(blocks, contentBlocksFromAny(right)...)
+	return blocks
+}
+
+func convertReasoningMessage(msg types.InputMessage) *types.AnthropicMessage {
+	content := reasoningText(msg.Content)
+	if content == "" {
+		content = reasoningText(msg.Summary)
+	}
+
+	var block types.AnthropicContentBlock
+	if content == "" && msg.EncryptedContent != "" {
+		block = types.AnthropicContentBlock{
+			Type: "redacted_thinking",
+			Data: msg.EncryptedContent,
+		}
+	} else {
+		block = types.AnthropicContentBlock{
+			Type:      "thinking",
+			Thinking:  content,
+			Signature: msg.EncryptedContent,
+		}
+	}
+	if block.Thinking == "" && block.Data == "" {
+		return nil
+	}
+
+	return &types.AnthropicMessage{
+		Role:    "assistant",
+		Content: []types.AnthropicContentBlock{block},
+	}
+}
+
+func reasoningText(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var parts []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t != "reasoning_text" && t != "summary_text" {
+				continue
+			}
+			if text, ok := m["text"].(string); ok {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
 	}
 }
 
@@ -305,6 +400,9 @@ func convertContent(content any, calls []types.ToolCall) any {
 }
 
 func contentBlocksFromAny(content any) []types.AnthropicContentBlock {
+	if blocks, ok := content.([]types.AnthropicContentBlock); ok {
+		return blocks
+	}
 	converted := convertContent(content, nil)
 	switch v := converted.(type) {
 	case string:
@@ -329,6 +427,14 @@ func convertContentBlock(item any) *types.AnthropicContentBlock {
 	switch t {
 	case "text", "input_text", "output_text":
 		return &types.AnthropicContentBlock{Type: "text", Text: textValue(m)}
+	case "thinking":
+		return &types.AnthropicContentBlock{
+			Type:      "thinking",
+			Thinking:  textValueKey(m, "thinking"),
+			Signature: textValueKey(m, "signature"),
+		}
+	case "redacted_thinking":
+		return &types.AnthropicContentBlock{Type: "redacted_thinking", Data: textValueKey(m, "data")}
 	case "image_url":
 		return imageBlock(imageURLValue(m["image_url"]))
 	case "input_image":
@@ -351,10 +457,22 @@ func convertContentBlock(item any) *types.AnthropicContentBlock {
 }
 
 func textValue(m map[string]any) string {
+	return textValueKey(m, "text")
+}
+
+func textValueKey(m map[string]any, key string) string {
 	if text, ok := m["text"].(string); ok {
+		if key == "text" {
+			return text
+		}
+	}
+	if text, ok := m[key].(string); ok {
 		return text
 	}
-	return fmt.Sprint(m["text"])
+	if key == "text" {
+		return fmt.Sprint(m["text"])
+	}
+	return ""
 }
 
 func imageURLValue(v any) string {
@@ -495,11 +613,14 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 
 	textContent := ""
 	webSearchCalls := make([]types.OutputItem, 0)
+	reasoningItems := make([]types.OutputItem, 0)
 	functionCalls := make([]types.OutputItem, 0)
 	var annotations []map[string]any
 
 	for i, block := range anthropicResp.Content {
 		switch block.Type {
+		case "thinking", "redacted_thinking":
+			reasoningItems = append(reasoningItems, reasoningOutputItem(anthropicResp.ID, i, block))
 		case "text":
 			startIndex := utf8.RuneCountInString(textContent)
 			textContent += block.Text
@@ -530,6 +651,7 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 	}
 
 	output = append(output, webSearchCalls...)
+	output = append(output, reasoningItems...)
 
 	if textContent != "" {
 		contentItem := map[string]any{
@@ -563,4 +685,31 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 			TotalTokens:  anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
 		},
 	}
+}
+
+func reasoningOutputItem(responseID string, index int, block types.AnthropicContentBlock) types.OutputItem {
+	item := types.OutputItem{
+		ID:     fmt.Sprintf("rs_%s_%d", responseID, index),
+		Type:   "reasoning",
+		Status: "completed",
+	}
+	switch block.Type {
+	case "thinking":
+		item.Content = []map[string]any{
+			{
+				"type": "reasoning_text",
+				"text": block.Thinking,
+			},
+		}
+		item.Summary = []map[string]any{
+			{
+				"type": "summary_text",
+				"text": block.Thinking,
+			},
+		}
+		item.EncryptedContent = block.Signature
+	case "redacted_thinking":
+		item.EncryptedContent = block.Data
+	}
+	return item
 }
