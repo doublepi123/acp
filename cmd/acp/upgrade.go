@@ -5,6 +5,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,6 +109,10 @@ func upgrade(opts upgradeOptions) error {
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading release body: %w", err)
+	}
+
+	if err := verifyChecksum(opts, asset, bodyBytes); err != nil {
+		return err
 	}
 
 	newBinary, err := extractBinary(bytes.NewReader(bodyBytes), int64(len(bodyBytes)), binaryName, opts.GOOS)
@@ -234,6 +240,52 @@ func extractBinaryZip(r io.ReaderAt, size int64, command string) ([]byte, error)
 	}
 
 	return nil, fmt.Errorf("release archive did not contain %s", command)
+}
+
+func verifyChecksum(opts upgradeOptions, asset string, data []byte) error {
+	checksumAsset := "checksums.txt"
+	checksumURL := releaseDownloadURL(opts.GitHubBaseURL, opts.Repo, opts.Tag, checksumAsset)
+	resp, err := http.Get(checksumURL)
+	if err != nil {
+		fmt.Printf("Warning: could not download checksums: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Warning: checksums.txt not available (HTTP %d), skipping verification\n", resp.StatusCode)
+		return nil
+	}
+
+	checksumData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Warning: could not read checksums: %v\n", err)
+		return nil
+	}
+
+	hash := sha256.Sum256(data)
+	actual := hex.EncodeToString(hash[:])
+
+	expected := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(checksumData)), "\n") {
+		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[1]) == asset {
+			expected = strings.TrimSpace(parts[0])
+			break
+		}
+	}
+
+	if expected == "" {
+		fmt.Printf("Warning: %s not found in checksums.txt, skipping verification\n", asset)
+		return nil
+	}
+
+	if actual != expected {
+		return fmt.Errorf("checksum mismatch for %s:\n  expected: %s\n  actual:   %s", asset, expected, actual)
+	}
+
+	fmt.Println("Checksum verified.")
+	return nil
 }
 
 func replaceExecutable(targetPath string, data []byte) error {

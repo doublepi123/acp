@@ -1,3 +1,3 @@
-module github.com/lcy/anthropic-openai-proxy
+module github.com/doublepi123/acp
 
 go 1.22

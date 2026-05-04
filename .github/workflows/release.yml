@@ -2,9 +2,13 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0). Leave empty to auto-increment.'
+        required: false
 
 env:
   GO_VERSION: '1.22.0'
@@ -13,7 +17,6 @@ env:
 jobs:
   tag:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     outputs:
@@ -27,30 +30,41 @@ jobs:
         id: tag
         run: |
           git fetch --tags --force
+
+          # If triggered by a tag push, use that tag
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             CURRENT_TAG="${GITHUB_REF_NAME}"
             echo "tag=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
             echo "Using pushed tag: $CURRENT_TAG"
-          elif CURRENT_TAG=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n 1); [ -n "$CURRENT_TAG" ]; then
-            echo "tag=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
-            echo "Commit already tagged as $CURRENT_TAG"
-          else
-            LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)
-            LAST_TAG=${LAST_TAG:-v0.0.0}
-            major=$(echo "$LAST_TAG" | cut -d. -f1 | tr -d v)
-            minor=$(echo "$LAST_TAG" | cut -d. -f2)
-            patch=$(echo "$LAST_TAG" | cut -d. -f3)
-            new_patch=$((patch + 1))
-            NEW_TAG="v${major}.${minor}.${new_patch}"
-            while git rev-parse -q --verify "refs/tags/$NEW_TAG" >/dev/null; do
-              new_patch=$((new_patch + 1))
-              NEW_TAG="v${major}.${minor}.${new_patch}"
-            done
-            echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
-            echo "Created tag: $NEW_TAG"
-            git tag "$NEW_TAG"
-            git push origin "$NEW_TAG"
+            exit 0
           fi
+
+          # If manually triggered with a tag input, use it
+          MANUAL_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$MANUAL_TAG" ]; then
+            echo "tag=$MANUAL_TAG" >> "$GITHUB_OUTPUT"
+            echo "Using manual tag: $MANUAL_TAG"
+            git tag "$MANUAL_TAG"
+            git push origin "$MANUAL_TAG"
+            exit 0
+          fi
+
+          # Otherwise auto-increment from the latest tag
+          LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)
+          LAST_TAG=${LAST_TAG:-v0.0.0}
+          major=$(echo "$LAST_TAG" | cut -d. -f1 | tr -d v)
+          minor=$(echo "$LAST_TAG" | cut -d. -f2)
+          patch=$(echo "$LAST_TAG" | cut -d. -f3)
+          new_patch=$((patch + 1))
+          NEW_TAG="v${major}.${minor}.${new_patch}"
+          while git rev-parse -q --verify "refs/tags/$NEW_TAG" >/dev/null; do
+            new_patch=$((new_patch + 1))
+            NEW_TAG="v${major}.${minor}.${new_patch}"
+          done
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "Created tag: $NEW_TAG"
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
 
   build:
     runs-on: ubuntu-latest
@@ -107,7 +121,6 @@ jobs:
     needs:
       - tag
       - build
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     steps:
@@ -120,6 +133,12 @@ jobs:
         with:
           path: artifacts
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec sha256sum {} \; | sed 's| \./[^/]*/|  |' > ../checksums.txt
+          cat ../checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -128,6 +147,7 @@ jobs:
           draft: false
           generate_release_notes: true
           files: |
+            checksums.txt
             artifacts/${{ env.PROJECT_NAME }}-darwin-amd64/${{ env.PROJECT_NAME }}-darwin-amd64.tar.gz
             artifacts/${{ env.PROJECT_NAME }}-darwin-arm64/${{ env.PROJECT_NAME }}-darwin-arm64.tar.gz
             artifacts/${{ env.PROJECT_NAME }}-linux-amd64/${{ env.PROJECT_NAME }}-linux-amd64.tar.gz

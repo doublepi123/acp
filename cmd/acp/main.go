@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lcy/anthropic-openai-proxy/config"
-	"github.com/lcy/anthropic-openai-proxy/internal/handler"
+	"github.com/doublepi123/acp/config"
+	"github.com/doublepi123/acp/internal/handler"
 )
 
 func main() {
@@ -52,10 +52,31 @@ func runServe() {
 	mux.HandleFunc("/health", h.HandleHealth)
 
 	addr := cfg.Host + ":" + cfg.Port
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 10 * time.Minute,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigCh
+		log.Printf("received signal %v, shutting down...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("acp proxy listening on %s (model: %s)", addr, cfg.DefaultModel)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
 	}
+	log.Printf("acp proxy stopped")
 }
 
 func runCodex() {

@@ -79,6 +79,26 @@ release_download_url() {
   fi
 }
 
+sha256_verify() {
+  file=$1
+  expected=$2
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$file" | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+  else
+    echo "Warning: neither sha256sum nor shasum found, skipping checksum verification" >&2
+    return 0
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "Checksum mismatch for $file" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    return 1
+  fi
+  echo "Checksum verified."
+}
+
 detect_profile() {
   if [ -n "${PROFILE:-}" ]; then
     echo "$PROFILE"
@@ -137,6 +157,7 @@ GOOS=$(detect_os)
 GOARCH=$(detect_arch)
 ASSET="$PROJECT_NAME-$GOOS-$GOARCH.tar.gz"
 DOWNLOAD_URL=$(release_download_url "$ASSET")
+CHECKSUM_URL=$(release_download_url "checksums.txt")
 
 need_command tar
 need_command mktemp
@@ -151,6 +172,19 @@ ARCHIVE_PATH="$TMP_DIR/$ASSET"
 
 echo "Downloading $PROJECT_NAME $TAG for $GOOS/$GOARCH..."
 download_file "$DOWNLOAD_URL" "$ARCHIVE_PATH"
+
+# Verify checksum
+CHECKSUM_FILE="$TMP_DIR/checksums.txt"
+if download_file "$CHECKSUM_URL" "$CHECKSUM_FILE" 2>/dev/null; then
+  EXPECTED=$(grep "  $ASSET$" "$CHECKSUM_FILE" | cut -d' ' -f1)
+  if [ -n "$EXPECTED" ]; then
+    sha256_verify "$ARCHIVE_PATH" "$EXPECTED"
+  else
+    echo "Warning: $ASSET not found in checksums.txt, skipping verification" >&2
+  fi
+else
+  echo "Warning: could not download checksums.txt, skipping verification" >&2
+fi
 
 tar -xzf "$ARCHIVE_PATH" -C "$TMP_DIR"
 if [ ! -f "$TMP_DIR/$COMMAND_NAME" ]; then
