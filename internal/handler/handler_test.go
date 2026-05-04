@@ -255,6 +255,57 @@ func TestConvertStreamEventMapsServerWebSearchWithoutFunctionCall(t *testing.T) 
 	}
 }
 
+func TestStreamOutputIndicesNoGapsAfterSkippedBlock(t *testing.T) {
+	state := newStreamState()
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	idx0 := 0
+	idx1 := 1
+	idx2 := 2
+
+	added0 := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx0,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "text",
+		},
+	}, "claude-test", state)
+	outIdx0 := decodeEvent(t, added0[0])["output_index"].(float64)
+	if outIdx0 != 0 {
+		t.Fatalf("first output_index = %v, want 0", outIdx0)
+	}
+
+	result := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx1,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type:      "web_search_tool_result",
+			ToolUseID: "srvtoolu_1",
+		},
+	}, "claude-test", state)
+	if len(result) != 0 {
+		t.Fatalf("web_search_tool_result emitted %#v, want nil (skipped block)", result)
+	}
+
+	added2 := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx2,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "text",
+		},
+	}, "claude-test", state)
+	outIdx2 := decodeEvent(t, added2[0])["output_index"].(float64)
+	if outIdx2 != 1 {
+		t.Fatalf("third output_index = %v, want 1 (no gap after skipped block)", outIdx2)
+	}
+}
+
 func TestMessagesURLTrimsTrailingSlash(t *testing.T) {
 	h := &Handler{AnthropicURL: "https://api.anthropic.com/"}
 	if got := h.messagesURL(); got != "https://api.anthropic.com/v1/messages" {

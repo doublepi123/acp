@@ -462,6 +462,236 @@ func TestToOpenAIResponseConvertsWebSearchCallAndCitations(t *testing.T) {
 	}
 }
 
+func TestMergesMultipleFunctionCallOutputsIntoSingleUserMessage(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "search and lookup"},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_1",
+				"call_id":   "call_1",
+				"name":      "search",
+				"arguments": `{"q":"weather"}`,
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_2",
+				"call_id":   "call_2",
+				"name":      "lookup",
+				"arguments": `{"key":"x"}`,
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_1",
+				"output":  "sunny",
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_2",
+				"output":  "found",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3 (user, assistant with 2 tool_uses, user with 2 tool_results)", len(got.Messages))
+	}
+
+	assistantBlocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	if len(assistantBlocks) != 2 {
+		t.Fatalf("len(assistantBlocks) = %d, want 2 tool_use blocks merged", len(assistantBlocks))
+	}
+
+	resultBlocks := got.Messages[2].Content.([]types.AnthropicContentBlock)
+	if len(resultBlocks) != 2 {
+		t.Fatalf("len(resultBlocks) = %d, want 2 tool_result blocks in same user message", len(resultBlocks))
+	}
+	if resultBlocks[0].ToolUseID != "call_1" || resultBlocks[1].ToolUseID != "call_2" {
+		t.Fatalf("tool_result IDs = %q %q, want call_1 call_2", resultBlocks[0].ToolUseID, resultBlocks[1].ToolUseID)
+	}
+	if resultBlocks[0].Content != "sunny" || resultBlocks[1].Content != "found" {
+		t.Fatalf("tool_result contents = %v %v, want sunny found", resultBlocks[0].Content, resultBlocks[1].Content)
+	}
+}
+
+func TestParallelCallsFalseSetsDisableParallelToolUse(t *testing.T) {
+	parallelFalse := false
+	req := &types.OpenAIResponseRequest{
+		Model:         "claude-sonnet-4-20250514",
+		Input:         "hello",
+		ParallelCalls: &parallelFalse,
+		Tools: []types.Tool{
+			{
+				Type:       "function",
+				Name:       "lookup",
+				Parameters: map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	choice, ok := got.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("ToolChoice = %T, want map[string]any", got.ToolChoice)
+	}
+	if choice["type"] != "auto" || choice["disable_parallel_tool_use"] != true {
+		t.Fatalf("ToolChoice = %#v, want auto with disable_parallel_tool_use", choice)
+	}
+}
+
+func TestParallelCallsTrueDoesNotSetDisableParallelToolUse(t *testing.T) {
+	parallelTrue := true
+	req := &types.OpenAIResponseRequest{
+		Model:         "claude-sonnet-4-20250514",
+		Input:         "hello",
+		ParallelCalls: &parallelTrue,
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if got.ToolChoice != nil {
+		t.Fatalf("ToolChoice = %#v, want nil when parallel_tool_calls is true", got.ToolChoice)
+	}
+}
+
+func TestReasoningAndForcedToolChoiceDisablesThinking(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "force a tool call",
+		Reasoning: map[string]any{
+			"effort": "medium",
+		},
+		ToolChoice: "required",
+		MaxTokens:  4096,
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if got.Thinking != nil {
+		t.Fatalf("Thinking = %#v, want nil when forced tool_choice conflicts with reasoning", got.Thinking)
+	}
+	choice, ok := got.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("ToolChoice = %T, want map[string]any", got.ToolChoice)
+	}
+	if choice["type"] != "any" {
+		t.Fatalf("ToolChoice = %#v, want forced any tool choice", choice)
+	}
+}
+
+func TestReasoningAndSpecificToolChoiceDisablesThinking(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "force a specific tool",
+		Reasoning: map[string]any{
+			"effort": "medium",
+		},
+		ToolChoice: map[string]any{"type": "function", "name": "lookup"},
+		MaxTokens:  4096,
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if got.Thinking != nil {
+		t.Fatalf("Thinking = %#v, want nil when specific tool_choice conflicts with reasoning", got.Thinking)
+	}
+	choice, ok := got.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("ToolChoice = %T, want map[string]any", got.ToolChoice)
+	}
+	if choice["type"] != "tool" || choice["name"] != "lookup" {
+		t.Fatalf("ToolChoice = %#v, want specific tool lookup", choice)
+	}
+}
+
+func TestUnknownToolTypeReturnsError(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "hello",
+		Tools: []types.Tool{
+			{Type: "bogus_tool"},
+		},
+	}
+
+	_, err := ToAnthropicRequest(req)
+	if err == nil {
+		t.Fatal("ToAnthropicRequest returned nil error, want error for unknown tool type")
+	}
+	if !strings.Contains(err.Error(), "unknown tool type") {
+		t.Fatalf("error = %q, want error containing 'unknown tool type'", err.Error())
+	}
+}
+
+func TestEmptyCallIDInFunctionCallOutputSkipsMessage(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "test"},
+				},
+			},
+			map[string]any{
+				"type":   "function_call_output",
+				"output": "no call id here",
+			},
+		},
+	}
+
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest returned error: %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1 (function_call_output without call_id skipped)", len(got.Messages))
+	}
+}
+
+func TestParseJSONOrStringWrapsNonObjectIntoObject(t *testing.T) {
+	result := parseJSONOrString(`"just a string"`)
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map[string]any", result)
+	}
+	if m["value"] != "just a string" {
+		t.Fatalf("m[value] = %#v, want 'just a string'", m["value"])
+	}
+}
+
+func TestParseJSONOrStringWrapsArrayIntoObject(t *testing.T) {
+	result := parseJSONOrString(`[1, 2, 3]`)
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map[string]any", result)
+	}
+	arr, ok := m["value"].([]any)
+	if !ok || len(arr) != 3 {
+		t.Fatalf("m[value] = %#v, want [1,2,3]", m["value"])
+	}
+}
+
 func TestToOpenAIResponseConvertsThinkingBlocksToReasoning(t *testing.T) {
 	resp := &types.AnthropicMessageResponse{
 		ID: "msg_1",

@@ -62,14 +62,26 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 					InputSchema: parameters,
 				})
 			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
+				allowedDomains := t.AllowedDomains
+				blockedDomains := t.BlockedDomains
+				if t.Filters != nil {
+					if len(t.Filters.AllowedDomains) > 0 {
+						allowedDomains = t.Filters.AllowedDomains
+					}
+					if len(t.Filters.BlockedDomains) > 0 {
+						blockedDomains = t.Filters.BlockedDomains
+					}
+				}
 				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
 					Type:           "web_search_20250305",
 					Name:           "web_search",
 					MaxUses:        t.MaxUses,
-					AllowedDomains: t.AllowedDomains,
-					BlockedDomains: t.BlockedDomains,
+					AllowedDomains: allowedDomains,
+					BlockedDomains: blockedDomains,
 					UserLocation:   t.UserLocation,
 				})
+			default:
+				return nil, fmt.Errorf("unknown tool type: %q", t.Type)
 			}
 		}
 	}
@@ -77,6 +89,13 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 	// Convert tool_choice
 	if openaiReq.ToolChoice != nil {
 		anthropicReq.ToolChoice = convertToolChoice(openaiReq.ToolChoice)
+		if anthropicReq.Thinking != nil && isForcedToolChoice(anthropicReq.ToolChoice) {
+			anthropicReq.Thinking = nil
+			anthropicReq.Temperature = openaiReq.Temperature
+		}
+	}
+	if openaiReq.ParallelCalls != nil && !*openaiReq.ParallelCalls {
+		anthropicReq.ToolChoice = withDisableParallelToolUse(anthropicReq.ToolChoice, len(anthropicReq.Tools) > 0)
 	}
 
 	// Convert input to messages + instructions (system)
@@ -112,16 +131,27 @@ func convertReasoningConfig(reasoning any, maxTokens int) any {
 	}
 }
 
+func isForcedToolChoice(tc any) bool {
+	switch v := tc.(type) {
+	case map[string]string:
+		return v["type"] == "any" || v["type"] == "tool"
+	case map[string]any:
+		t, _ := v["type"].(string)
+		return t == "any" || t == "tool"
+	}
+	return false
+}
+
 func convertToolChoice(tc any) any {
 	switch v := tc.(type) {
 	case string:
 		switch v {
 		case "auto":
-			return map[string]string{"type": "auto"}
+			return map[string]any{"type": "auto"}
 		case "none":
-			return map[string]string{"type": "none"}
+			return map[string]any{"type": "none"}
 		case "required":
-			return map[string]string{"type": "any"}
+			return map[string]any{"type": "any"}
 		default:
 			return map[string]any{"type": "tool", "name": v}
 		}
@@ -143,6 +173,31 @@ func convertToolChoice(tc any) any {
 		}
 	}
 	return nil
+}
+
+func withDisableParallelToolUse(tc any, hasTools bool) any {
+	if !hasTools {
+		return tc
+	}
+
+	choice, ok := tc.(map[string]any)
+	if !ok || choice == nil {
+		return map[string]any{
+			"type":                      "auto",
+			"disable_parallel_tool_use": true,
+		}
+	}
+
+	if choice["type"] == "none" {
+		return choice
+	}
+
+	out := make(map[string]any, len(choice)+1)
+	for k, v := range choice {
+		out[k] = v
+	}
+	out["disable_parallel_tool_use"] = true
+	return out
 }
 
 func convertInput(input any, instructions string) ([]types.AnthropicMessage, string, error) {
@@ -215,6 +270,9 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 		if callID == "" {
 			callID = msg.ToolID
 		}
+		if callID == "" {
+			return nil
+		}
 		return &types.AnthropicMessage{
 			Role: "user",
 			Content: []types.AnthropicContentBlock{
@@ -238,15 +296,35 @@ func convertInputMessage(msg types.InputMessage) *types.AnthropicMessage {
 }
 
 func appendOrMergeMessage(messages []types.AnthropicMessage, msg types.AnthropicMessage) []types.AnthropicMessage {
-	if len(messages) == 0 || msg.Role != "assistant" {
+	if len(messages) == 0 {
 		return append(messages, msg)
 	}
 	last := &messages[len(messages)-1]
-	if last.Role != "assistant" {
-		return append(messages, msg)
+
+	if last.Role == "assistant" && msg.Role == "assistant" {
+		last.Content = appendContentBlocks(last.Content, msg.Content)
+		return messages
 	}
-	last.Content = appendContentBlocks(last.Content, msg.Content)
-	return messages
+
+	if last.Role == "user" && msg.Role == "user" && hasToolResult(last.Content) {
+		last.Content = appendContentBlocks(last.Content, msg.Content)
+		return messages
+	}
+
+	return append(messages, msg)
+}
+
+func hasToolResult(content any) bool {
+	blocks, ok := content.([]types.AnthropicContentBlock)
+	if !ok {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 func appendContentBlocks(left any, right any) []types.AnthropicContentBlock {
@@ -307,6 +385,9 @@ func convertFunctionCallMessage(msg types.InputMessage) *types.AnthropicMessage 
 	if callID == "" {
 		callID = msg.ID
 	}
+	if callID == "" {
+		return nil
+	}
 
 	input := parseJSONOrString(msg.Arguments)
 	if msg.Arguments == "" && msg.Content != nil {
@@ -314,6 +395,9 @@ func convertFunctionCallMessage(msg types.InputMessage) *types.AnthropicMessage 
 	}
 	if msg.Arguments == "" && msg.Content == nil {
 		input = map[string]any{}
+	}
+	if _, ok := input.(map[string]any); !ok {
+		input = map[string]any{"value": input}
 	}
 
 	return &types.AnthropicMessage{
@@ -333,6 +417,9 @@ func convertFunctionCallOutputMessage(msg types.InputMessage) *types.AnthropicMe
 	callID := msg.CallID
 	if callID == "" {
 		callID = msg.ToolID
+	}
+	if callID == "" {
+		return nil
 	}
 	content := msg.Output
 	if content == nil {
@@ -367,6 +454,9 @@ func convertContent(content any, calls []types.ToolCall) any {
 				if arguments == "" {
 					arguments = c.Function.Arguments
 				}
+			}
+			if c.ID == "" {
+				continue
 			}
 			blocks = append(blocks, types.AnthropicContentBlock{
 				Type:  "tool_use",
@@ -539,7 +629,10 @@ func parseJSONOrString(s string) any {
 	}
 	var input any
 	if err := json.Unmarshal([]byte(s), &input); err != nil {
-		return s
+		return map[string]any{"value": s}
+	}
+	if _, ok := input.(map[string]any); !ok {
+		return map[string]any{"value": input}
 	}
 	return input
 }
@@ -580,15 +673,29 @@ func blockCitations(block types.AnthropicContentBlock, startIndex int) []map[str
 		if url == "" {
 			continue
 		}
+		cStart, cEnd := citationRange(block.Text, c.CitedText, startIndex)
 		annotations = append(annotations, map[string]any{
 			"type":        "url_citation",
-			"start_index": startIndex,
-			"end_index":   startIndex + utf8.RuneCountInString(block.Text),
+			"start_index": cStart,
+			"end_index":   cEnd,
 			"url":         url,
 			"title":       c.Title,
 		})
 	}
 	return annotations
+}
+
+func citationRange(text, citedText string, startIndex int) (int, int) {
+	if citedText == "" {
+		return startIndex, startIndex + utf8.RuneCountInString(text)
+	}
+	pos := strings.Index(text, citedText)
+	if pos < 0 {
+		return startIndex, startIndex + utf8.RuneCountInString(text)
+	}
+	prefixLen := utf8.RuneCountInString(text[:pos])
+	citedLen := utf8.RuneCountInString(citedText)
+	return startIndex + prefixLen, startIndex + prefixLen + citedLen
 }
 
 func webSearchAction(input any) any {

@@ -35,16 +35,23 @@ type InputMessage struct {
 
 // Tool represents a tool definition.
 type Tool struct {
-	Type              string        `json:"type"`
-	Name              string        `json:"name,omitempty"`
-	Description       string        `json:"description,omitempty"`
-	Parameters        any           `json:"parameters,omitempty"`
-	Function          *FunctionTool `json:"function,omitempty"`
-	MaxUses           *int          `json:"max_uses,omitempty"`
-	AllowedDomains    []string      `json:"allowed_domains,omitempty"`
-	BlockedDomains    []string      `json:"blocked_domains,omitempty"`
-	UserLocation      any           `json:"user_location,omitempty"`
-	SearchContextSize string        `json:"search_context_size,omitempty"`
+	Type              string            `json:"type"`
+	Name              string            `json:"name,omitempty"`
+	Description       string            `json:"description,omitempty"`
+	Parameters        any               `json:"parameters,omitempty"`
+	Function          *FunctionTool     `json:"function,omitempty"`
+	MaxUses           *int              `json:"max_uses,omitempty"`
+	AllowedDomains    []string          `json:"allowed_domains,omitempty"`
+	BlockedDomains    []string          `json:"blocked_domains,omitempty"`
+	UserLocation      any               `json:"user_location,omitempty"`
+	SearchContextSize string            `json:"search_context_size,omitempty"`
+	Filters           *WebSearchFilters `json:"filters,omitempty"`
+}
+
+// WebSearchFilters represents nested filters for web search tools.
+type WebSearchFilters struct {
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 // FunctionTool represents Chat Completions-style nested function tool details.
@@ -52,6 +59,7 @@ type FunctionTool struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 	Parameters  any    `json:"parameters,omitempty"`
+	Strict      *bool  `json:"strict,omitempty"`
 }
 
 // ToolCall represents a tool call from the model.

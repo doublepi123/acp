@@ -222,39 +222,44 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 }
 
 type streamState struct {
-	responseID string
-	createdAt  int64
-	seq        int64
-	blockTypes map[int]string
-	blockNames map[int]string
-	blockIDs   map[int]string
-	callIDs    map[int]string
-	callIndex  map[string]int
-	text       map[int]string
-	thinking   map[int]string
-	signatures map[int]string
-	args       map[int]string
-	citations  map[int]int
-	output     []any
+	responseID      string
+	createdAt       int64
+	seq             int64
+	blockTypes      map[int]string
+	blockNames      map[int]string
+	blockIDs        map[int]string
+	callIDs         map[int]string
+	callIndex       map[string]int
+	text            map[int]string
+	thinking        map[int]string
+	signatures      map[int]string
+	args            map[int]string
+	citations       map[int]int
+	citationTextLen map[int]int
+	output          []any
+	outputIndices   map[int]int
+	nextOutputIdx   int
 }
 
 func newStreamState() *streamState {
 	now := time.Now()
 	fallbackID := fmt.Sprintf("resp_%d", now.UnixNano())
 	return &streamState{
-		responseID: fallbackID,
-		createdAt:  now.Unix(),
-		blockTypes: make(map[int]string),
-		blockNames: make(map[int]string),
-		blockIDs:   make(map[int]string),
-		callIDs:    make(map[int]string),
-		callIndex:  make(map[string]int),
-		text:       make(map[int]string),
-		thinking:   make(map[int]string),
-		signatures: make(map[int]string),
-		args:       make(map[int]string),
-		citations:  make(map[int]int),
-		output:     []any{},
+		responseID:      fallbackID,
+		createdAt:       now.Unix(),
+		blockTypes:      make(map[int]string),
+		blockNames:      make(map[int]string),
+		blockIDs:        make(map[int]string),
+		callIDs:         make(map[int]string),
+		callIndex:       make(map[string]int),
+		text:            make(map[int]string),
+		thinking:        make(map[int]string),
+		signatures:      make(map[int]string),
+		args:            make(map[int]string),
+		citations:       make(map[int]int),
+		citationTextLen: make(map[int]int),
+		output:          []any{},
+		outputIndices:   make(map[int]int),
 	}
 }
 
@@ -323,6 +328,8 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 
 		switch event.ContentBlock.Type {
 		case "thinking", "redacted_thinking":
+			state.outputIndices[idx] = state.nextOutputIdx
+			state.nextOutputIdx++
 			itemID := state.itemID(idx, "reasoning")
 			if event.ContentBlock.Thinking != "" {
 				state.thinking[idx] = event.ContentBlock.Thinking
@@ -336,7 +343,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item": map[string]any{
 					"id":      itemID,
 					"type":    "reasoning",
@@ -346,11 +353,13 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			return []string{state.event(resp)}
 		case "text":
+			state.outputIndices[idx] = state.nextOutputIdx
+			state.nextOutputIdx++
 			itemID := state.itemID(idx, "msg")
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item": map[string]any{
 					"id":      itemID,
 					"type":    "message",
@@ -361,13 +370,15 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			return []string{state.event(resp)}
 		case "tool_use":
+			state.outputIndices[idx] = state.nextOutputIdx
+			state.nextOutputIdx++
 			itemID := state.itemID(idx, "call")
 			state.callIDs[idx] = event.ContentBlock.ID
 			state.callIndex[event.ContentBlock.ID] = idx
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item": map[string]any{
 					"id":        itemID,
 					"type":      "function_call",
@@ -379,6 +390,8 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			}
 			return []string{state.event(resp)}
 		case "server_tool_use":
+			state.outputIndices[idx] = state.nextOutputIdx
+			state.nextOutputIdx++
 			itemID := state.itemID(idx, "web_search")
 			if event.ContentBlock.ID != "" {
 				itemID = event.ContentBlock.ID
@@ -389,7 +402,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			resp := map[string]any{
 				"type":         "response.output_item.added",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item": map[string]any{
 					"id":     itemID,
 					"type":   "web_search_call",
@@ -412,17 +425,18 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 				"action": streamWebSearchAction(state.args[searchIdx]),
 			}
 			state.output = append(state.output, item)
+			outIdx := state.outputIndices[searchIdx]
 			return []string{
 				state.event(map[string]any{
 					"type":         "response.web_search_call.completed",
 					"response_id":  state.responseID,
-					"output_index": searchIdx,
+					"output_index": outIdx,
 					"item_id":      itemID,
 				}),
 				state.event(map[string]any{
 					"type":         "response.output_item.done",
 					"response_id":  state.responseID,
-					"output_index": searchIdx,
+					"output_index": outIdx,
 					"item":         item,
 				}),
 			}
@@ -445,7 +459,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			resp := map[string]any{
 				"type":          "response.output_text.delta",
 				"response_id":   state.responseID,
-				"output_index":  event.Index,
+				"output_index":  state.outputIndices[idx],
 				"item_id":       state.itemID(idx, "msg"),
 				"content_index": 0,
 				"delta":         event.Delta.Text,
@@ -459,7 +473,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			resp := map[string]any{
 				"type":         "response.function_call_arguments.delta",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item_id":      state.itemID(idx, "call"),
 				"delta":        event.Delta.PartialJSON,
 			}
@@ -477,18 +491,24 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 				return nil
 			}
 			annotationIndex := state.citations[idx]
+			startIdx := 0
+			if prevLen, ok := state.citationTextLen[idx]; ok {
+				startIdx = prevLen
+			}
+			currentLen := utf8.RuneCountInString(state.text[idx])
+			state.citationTextLen[idx] = currentLen
 			state.citations[idx]++
 			resp := map[string]any{
 				"type":             "response.output_text.annotation.added",
 				"response_id":      state.responseID,
-				"output_index":     event.Index,
+				"output_index":     state.outputIndices[idx],
 				"item_id":          state.itemID(idx, "msg"),
 				"content_index":    0,
 				"annotation_index": annotationIndex,
 				"annotation": map[string]any{
 					"type":        "url_citation",
-					"start_index": 0,
-					"end_index":   utf8.RuneCountInString(state.text[idx]),
+					"start_index": startIdx,
+					"end_index":   currentLen,
 					"url":         url,
 					"title":       citation.Title,
 				},
@@ -551,7 +571,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			done := map[string]any{
 				"type":         "response.function_call_arguments.done",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item_id":      itemID,
 				"call_id":      state.callIDs[idx],
 				"name":         state.blockNames[idx],
@@ -562,7 +582,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			searching := map[string]any{
 				"type":         "response.web_search_call.searching",
 				"response_id":  state.responseID,
-				"output_index": event.Index,
+				"output_index": state.outputIndices[idx],
 				"item_id":      itemID,
 			}
 			return []string{state.event(searching)}
@@ -572,7 +592,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		resp := map[string]any{
 			"type":         "response.output_item.done",
 			"response_id":  state.responseID,
-			"output_index": event.Index,
+			"output_index": state.outputIndices[idx],
 			"item":         item,
 		}
 		events = append(events, state.event(resp))
