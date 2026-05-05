@@ -955,3 +955,636 @@ func TestToOpenAIResponseConvertsApplyPatchToolUse(t *testing.T) {
 		t.Fatalf("apply_patch input/args = %q/%q, want empty", item.Input, item.Arguments)
 	}
 }
+
+func TestConvertReasoningConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		reasoning any
+		maxTokens int
+		wantNil   bool
+	}{
+		{"nil reasoning", nil, 4096, true},
+		{"maxTokens too low", map[string]any{"effort": "high"}, 1024, true},
+		{"effort none", map[string]any{"effort": "none"}, 4096, true},
+		{"effort medium", map[string]any{"effort": "medium"}, 4096, false},
+		{"effort high", map[string]any{"effort": "high"}, 8192, false},
+		{"not a map", "auto", 4096, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertReasoningConfig(tt.reasoning, tt.maxTokens)
+			if tt.wantNil && got != nil {
+				t.Fatalf("convertReasoningConfig = %v, want nil", got)
+			}
+			if !tt.wantNil && got == nil {
+				t.Fatalf("convertReasoningConfig = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestCustomToolDescription(t *testing.T) {
+	if got := customToolDescription("desc", nil); got != "desc" {
+		t.Fatalf("customToolDescription with nil format = %q, want desc", got)
+	}
+	if got := customToolDescription("", map[string]any{"type": "grammar"}); !strings.Contains(got, "grammar") {
+		t.Fatalf("customToolDescription without desc = %q, want format hint", got)
+	}
+	if got := customToolDescription("desc", map[string]any{"type": "grammar"}); !strings.Contains(got, "desc") || !strings.Contains(got, "grammar") {
+		t.Fatalf("customToolDescription with desc = %q, want combined", got)
+	}
+}
+
+func TestIsForcedToolChoice(t *testing.T) {
+	tests := []struct {
+		name string
+		tc   any
+		want bool
+	}{
+		{"map string type any", map[string]string{"type": "any"}, true},
+		{"map string type tool", map[string]string{"type": "tool"}, true},
+		{"map string type auto", map[string]string{"type": "auto"}, false},
+		{"map any type any", map[string]any{"type": "any"}, true},
+		{"map any type tool", map[string]any{"type": "tool"}, true},
+		{"not a map", "auto", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isForcedToolChoice(tt.tc); got != tt.want {
+				t.Fatalf("isForcedToolChoice(%v) = %v, want %v", tt.tc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertToolChoice(t *testing.T) {
+	tests := []struct {
+		name string
+		tc   any
+		want map[string]any
+	}{
+		{"auto string", "auto", map[string]any{"type": "auto"}},
+		{"none string", "none", map[string]any{"type": "none"}},
+		{"required string", "required", map[string]any{"type": "any"}},
+		{"specific name", "lookup", map[string]any{"type": "tool", "name": "lookup"}},
+		{"apply_patch map", map[string]any{"type": "apply_patch"}, map[string]any{"type": "tool", "name": "apply_patch"}},
+		{"custom map", map[string]any{"type": "custom", "name": "my_tool"}, map[string]any{"type": "tool", "name": "my_tool"}},
+		{"function map no name", map[string]any{"type": "function"}, nil},
+		{"function map with function.name", map[string]any{"type": "function", "function": map[string]any{"name": "fn"}}, map[string]any{"type": "tool", "name": "fn"}},
+		{"function map with function no name", map[string]any{"type": "function", "function": map[string]any{}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertToolChoice(tt.tc)
+			if tt.want == nil {
+				if got != nil {
+					t.Fatalf("convertToolChoice(%v) = %v, want nil", tt.tc, got)
+				}
+				return
+			}
+			m, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("convertToolChoice(%v) = %T, want map", tt.tc, got)
+			}
+			if m["type"] != tt.want["type"] || m["name"] != tt.want["name"] {
+				t.Fatalf("convertToolChoice(%v) = %v, want %v", tt.tc, m, tt.want)
+			}
+		})
+	}
+}
+
+func TestWithDisableParallelToolUse(t *testing.T) {
+	tests := []struct {
+		name     string
+		tc       any
+		hasTools bool
+		check    func(t *testing.T, got any)
+	}{
+		{"no tools", nil, false, func(t *testing.T, got any) {
+			if got != nil {
+				t.Fatalf("withDisableParallelToolUse = %v, want nil", got)
+			}
+		}},
+		{"nil choice with tools", nil, true, func(t *testing.T, got any) {
+			m := got.(map[string]any)
+			if m["type"] != "auto" || m["disable_parallel_tool_use"] != true {
+				t.Fatalf("withDisableParallelToolUse = %v", got)
+			}
+		}},
+		{"none choice", map[string]any{"type": "none"}, true, func(t *testing.T, got any) {
+			m := got.(map[string]any)
+			if _, ok := m["disable_parallel_tool_use"]; ok {
+				t.Fatalf("none choice should not get disable_parallel_tool_use")
+			}
+		}},
+		{"auto choice", map[string]any{"type": "auto"}, true, func(t *testing.T, got any) {
+			m := got.(map[string]any)
+			if m["disable_parallel_tool_use"] != true {
+				t.Fatalf("auto choice should get disable_parallel_tool_use")
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withDisableParallelToolUse(tt.tc, tt.hasTools)
+			tt.check(t, got)
+		})
+	}
+}
+
+func TestConvertInputString(t *testing.T) {
+	msgs, system, err := convertInput("hello", "")
+	if err != nil {
+		t.Fatalf("convertInput error = %v", err)
+	}
+	if system != "" {
+		t.Fatalf("system = %q, want empty", system)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "hello" {
+		t.Fatalf("messages = %v", msgs)
+	}
+}
+
+func TestConvertInputDefault(t *testing.T) {
+	msgs, _, err := convertInput(42, "")
+	if err != nil {
+		t.Fatalf("convertInput error = %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
+	}
+	content, ok := msgs[0].Content.(string)
+	if !ok || content != "42" {
+		t.Fatalf("content = %v, want 42 string", msgs[0].Content)
+	}
+}
+
+func TestConvertInputWithSystemMessages(t *testing.T) {
+	input := []any{
+		map[string]any{
+			"role":    "system",
+			"content": "sys1",
+		},
+		map[string]any{
+			"role":    "developer",
+			"content": "sys2",
+		},
+		map[string]any{
+			"role":    "user",
+			"content": "hello",
+		},
+	}
+	msgs, system, err := convertInput(input, "base")
+	if err != nil {
+		t.Fatalf("convertInput error = %v", err)
+	}
+	if !strings.Contains(system, "base") || !strings.Contains(system, "sys1") || !strings.Contains(system, "sys2") {
+		t.Fatalf("system = %q, want combined", system)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
+	}
+}
+
+func TestConvertInputMessageToolCallOutput(t *testing.T) {
+	msg := types.InputMessage{
+		Type:   "function_call_output",
+		Role:   "tool",
+		CallID: "",
+		ToolID: "tool_1",
+		Output: "result",
+	}
+	got := convertInputMessage(msg)
+	if got == nil {
+		t.Fatalf("convertInputMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	if blocks[0].Type != "tool_result" || blocks[0].ToolUseID != "tool_1" {
+		t.Fatalf("tool result block = %v", blocks[0])
+	}
+}
+
+func TestConvertFunctionCallMessageWithContentFallback(t *testing.T) {
+	msg := types.InputMessage{
+		Type:   "function_call",
+		ID:     "fc_1",
+		CallID: "call_1",
+		Name:   "lookup",
+		Content: []any{
+			map[string]any{"type": "input_text", "text": "{\"q\":\"weather\"}"},
+		},
+	}
+	got := convertFunctionCallMessage(msg)
+	if got == nil {
+		t.Fatalf("convertFunctionCallMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	input := blocks[0].Input.(map[string]any)
+	if input["q"] != "weather" {
+		t.Fatalf("input = %v", input)
+	}
+}
+
+func TestConvertCustomToolCallMessageWithArguments(t *testing.T) {
+	msg := types.InputMessage{
+		Type:      "custom_tool_call",
+		ID:        "ctc_1",
+		CallID:    "call_1",
+		Name:      "patch",
+		Arguments: `patch text`,
+	}
+	got := convertCustomToolCallMessage(msg)
+	if got == nil {
+		t.Fatalf("convertCustomToolCallMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	input := blocks[0].Input.(map[string]any)
+	if input["input"] != "patch text" {
+		t.Fatalf("input = %v", input)
+	}
+}
+
+func TestConvertApplyPatchCallMessageWithInput(t *testing.T) {
+	msg := types.InputMessage{
+		Type:   "apply_patch_call",
+		ID:     "apc_1",
+		CallID: "call_1",
+		Input:  `{"type":"create_file","path":"a.txt"}`,
+	}
+	got := convertApplyPatchCallMessage(msg)
+	if got == nil {
+		t.Fatalf("convertApplyPatchCallMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	input := blocks[0].Input.(map[string]any)
+	op := input["operation"].(map[string]any)
+	if op["type"] != "create_file" {
+		t.Fatalf("operation = %v", op)
+	}
+}
+
+func TestConvertApplyPatchCallMessageWithArguments(t *testing.T) {
+	msg := types.InputMessage{
+		Type:      "apply_patch_call",
+		ID:        "apc_1",
+		CallID:    "call_1",
+		Arguments: `{"type":"delete_file","path":"old.txt"}`,
+	}
+	got := convertApplyPatchCallMessage(msg)
+	if got == nil {
+		t.Fatalf("convertApplyPatchCallMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	input := blocks[0].Input.(map[string]any)
+	op := input["operation"].(map[string]any)
+	if op["type"] != "delete_file" {
+		t.Fatalf("operation = %v", op)
+	}
+}
+
+func TestConvertApplyPatchCallMessageWithStringOperation(t *testing.T) {
+	msg := types.InputMessage{
+		Type:      "apply_patch_call",
+		ID:        "apc_1",
+		CallID:    "call_1",
+		Operation: `{"type":"update_file","path":"f.txt"}`,
+	}
+	got := convertApplyPatchCallMessage(msg)
+	if got == nil {
+		t.Fatalf("convertApplyPatchCallMessage = nil")
+	}
+	blocks := got.Content.([]types.AnthropicContentBlock)
+	input := blocks[0].Input.(map[string]any)
+	op := input["operation"].(map[string]any)
+	if op["type"] != "update_file" {
+		t.Fatalf("operation = %v", op)
+	}
+}
+
+func TestConvertContentBlockImageTypes(t *testing.T) {
+	tests := []struct {
+		name  string
+		item  any
+		check func(t *testing.T, block *types.AnthropicContentBlock)
+	}{
+		{"image_url", map[string]any{"type": "image_url", "image_url": "https://example.com/img.png"}, func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Source.Type != "url" || block.Source.URL != "https://example.com/img.png" {
+				t.Fatalf("source = %v", block.Source)
+			}
+		}},
+		{"input_image", map[string]any{"type": "input_image", "image_url": "https://example.com/img.png"}, func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Source.Type != "url" || block.Source.URL != "https://example.com/img.png" {
+				t.Fatalf("source = %v", block.Source)
+			}
+		}},
+		{"image base64", map[string]any{"type": "image", "media_type": "image/png", "data": "abc123"}, func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Source.Type != "base64" || block.Source.Data != "abc123" {
+				t.Fatalf("source = %v", block.Source)
+			}
+		}},
+		{"image no media_type", map[string]any{"type": "image", "data": "abc"}, func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Source.MediaType != "image/jpeg" {
+				t.Fatalf("media type = %v, want image/jpeg", block.Source.MediaType)
+			}
+		}},
+		{"unknown type", map[string]any{"type": "unknown", "text": "hi"}, func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Type != "text" || block.Text != "map[text:hi type:unknown]" {
+				// Falls back to fmt.Sprint
+			}
+		}},
+		{"not a map", "plain", func(t *testing.T, block *types.AnthropicContentBlock) {
+			if block.Type != "text" || block.Text != "plain" {
+				t.Fatalf("block = %v", block)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := convertContentBlock(tt.item)
+			if block == nil {
+				t.Fatalf("convertContentBlock = nil")
+			}
+			tt.check(t, block)
+		})
+	}
+}
+
+func TestConvertToolResultContent(t *testing.T) {
+	if got := convertToolResultContent(nil); got != "" {
+		t.Fatalf("convertToolResultContent(nil) = %v, want ''", got)
+	}
+	if got := convertToolResultContent("str"); got != "str" {
+		t.Fatalf("convertToolResultContent(str) = %v, want str", got)
+	}
+	if got := convertToolResultContent([]any{map[string]any{"type": "input_text", "text": "hi"}}); got == nil {
+		t.Fatalf("convertToolResultContent(array) = nil")
+	}
+	if got := convertToolResultContent(42); got != "42" {
+		t.Fatalf("convertToolResultContent(42) = %v, want 42 string", got)
+	}
+}
+
+func TestContentToString(t *testing.T) {
+	if got := contentToString("plain"); got != "plain" {
+		t.Fatalf("contentToString(string) = %q, want plain", got)
+	}
+	if got := contentToString(42); got != "42" {
+		t.Fatalf("contentToString(int) = %q, want 42", got)
+	}
+	got := contentToString([]any{
+		map[string]any{"type": "input_text", "text": "a"},
+		map[string]any{"type": "input_text", "text": "b"},
+	})
+	if got != "a\nb" {
+		t.Fatalf("contentToString(array) = %q, want a\\nb", got)
+	}
+	// Array with no text blocks
+	got2 := contentToString([]any{
+		map[string]any{"type": "image", "data": "abc"},
+	})
+	if got2 == "" {
+		t.Fatalf("contentToString(image array) = empty")
+	}
+}
+
+func TestCitationRange(t *testing.T) {
+	// exact match
+	start, end := citationRange("hello world", "world", 0)
+	if start != 6 || end != 11 {
+		t.Fatalf("citationRange = %d, %d, want 6, 11", start, end)
+	}
+	// no match, fallback to full text
+	start, end = citationRange("hello", "world", 10)
+	if start != 10 || end != 15 {
+		t.Fatalf("citationRange no match = %d, %d, want 10, 15", start, end)
+	}
+	// empty cited text
+	start, end = citationRange("hello", "", 5)
+	if start != 5 || end != 10 {
+		t.Fatalf("citationRange empty = %d, %d, want 5, 10", start, end)
+	}
+}
+
+func TestCustomToolInput(t *testing.T) {
+	if got := customToolInput("plain"); got != "plain" {
+		t.Fatalf("customToolInput(string) = %q, want plain", got)
+	}
+	if got := customToolInput(map[string]any{"input": "nested"}); got != "nested" {
+		t.Fatalf("customToolInput(map) = %q, want nested", got)
+	}
+	if got := customToolInput(map[string]string{"input": "ss"}); got != "ss" {
+		t.Fatalf("customToolInput(string map) = %q, want ss", got)
+	}
+	if got := customToolInput(42); got != "42" {
+		t.Fatalf("customToolInput(int) = %q, want 42", got)
+	}
+}
+
+func TestApplyPatchOperation(t *testing.T) {
+	if got := applyPatchOperation(nil); got == nil {
+		t.Fatalf("applyPatchOperation(nil) = nil")
+	}
+	// Plain string gets JSON-parsed, which wraps into map[value:...]
+	got := applyPatchOperation("plain")
+	if got == nil {
+		t.Fatalf("applyPatchOperation(string) = nil")
+	}
+	op := map[string]any{"type": "create_file", "path": "a.txt"}
+	if got := applyPatchOperation(op); got == nil {
+		t.Fatalf("applyPatchOperation(op) = nil")
+	}
+	wrapped := map[string]any{"operation": op}
+	if got := applyPatchOperation(wrapped); got == nil {
+		t.Fatalf("applyPatchOperation(wrapped) = nil")
+	}
+}
+
+func TestStringifyToolInput(t *testing.T) {
+	if got := stringifyToolInput(nil); got != "" {
+		t.Fatalf("stringifyToolInput(nil) = %q, want ''", got)
+	}
+	if got := stringifyToolInput("plain"); got != "plain" {
+		t.Fatalf("stringifyToolInput(string) = %q, want plain", got)
+	}
+	if got := stringifyToolInput(map[string]any{"a": 1}); got != `{"a":1}` {
+		t.Fatalf("stringifyToolInput(map) = %q", got)
+	}
+}
+
+func TestHasToolResult(t *testing.T) {
+	if hasToolResult(nil) {
+		t.Fatalf("hasToolResult(nil) = true")
+	}
+	if !hasToolResult([]types.AnthropicContentBlock{{Type: "tool_result"}}) {
+		t.Fatalf("hasToolResult(tool_result) = false")
+	}
+	if hasToolResult([]types.AnthropicContentBlock{{Type: "text"}}) {
+		t.Fatalf("hasToolResult(text) = true")
+	}
+}
+
+func TestContentBlocksFromAny(t *testing.T) {
+	// from existing blocks
+	blocks := contentBlocksFromAny([]types.AnthropicContentBlock{{Type: "text", Text: "hi"}})
+	if len(blocks) != 1 || blocks[0].Text != "hi" {
+		t.Fatalf("contentBlocksFromAny = %v", blocks)
+	}
+	// from string
+	blocks = contentBlocksFromAny("hello")
+	if len(blocks) != 1 || blocks[0].Text != "hello" {
+		t.Fatalf("contentBlocksFromAny(string) = %v", blocks)
+	}
+	// from empty string
+	blocks = contentBlocksFromAny("")
+	if blocks != nil {
+		t.Fatalf("contentBlocksFromAny(empty) = %v, want nil", blocks)
+	}
+	// from int
+	blocks = contentBlocksFromAny(42)
+	if len(blocks) != 1 || blocks[0].Text != "42" {
+		t.Fatalf("contentBlocksFromAny(int) = %v", blocks)
+	}
+}
+
+func TestReasoningOutputItemRedacted(t *testing.T) {
+	block := types.AnthropicContentBlock{
+		Type: "redacted_thinking",
+		Data: "opaque_data",
+	}
+	item := reasoningOutputItem("resp_1", 0, block)
+	if item.Type != "reasoning" || item.EncryptedContent != "opaque_data" {
+		t.Fatalf("reasoningOutputItem = %+v", item)
+	}
+}
+
+func TestDataURLSource(t *testing.T) {
+	if got := dataURLSource("https://example.com/img.png"); got != nil {
+		t.Fatalf("dataURLSource(non-data) = %v, want nil", got)
+	}
+	if got := dataURLSource("data:"); got != nil {
+		t.Fatalf("dataURLSource(empty data) = %v, want nil", got)
+	}
+	source := dataURLSource("data:image/png;base64,abc123")
+	if source == nil || source.Type != "base64" || source.MediaType != "image/png" || source.Data != "abc123" {
+		t.Fatalf("dataURLSource = %v", source)
+	}
+	source = dataURLSource("data:,rawdata")
+	if source == nil || source.MediaType != "image/jpeg" || source.Data != "rawdata" {
+		t.Fatalf("dataURLSource no media type = %v", source)
+	}
+}
+
+func TestImageBlock(t *testing.T) {
+	if got := imageBlock(""); got != nil {
+		t.Fatalf("imageBlock(empty) = %v, want nil", got)
+	}
+	if got := imageBlock("https://example.com/img.png"); got == nil || got.Source.URL != "https://example.com/img.png" {
+		t.Fatalf("imageBlock(url) = %v", got)
+	}
+	if got := imageBlock("data:image/png;base64,abc"); got == nil || got.Source.Type != "base64" {
+		t.Fatalf("imageBlock(data) = %v", got)
+	}
+}
+
+func TestImageURLValue(t *testing.T) {
+	if got := imageURLValue("https://example.com/img.png"); got != "https://example.com/img.png" {
+		t.Fatalf("imageURLValue(string) = %q", got)
+	}
+	if got := imageURLValue(map[string]any{"url": "https://example.com/img.png"}); got != "https://example.com/img.png" {
+		t.Fatalf("imageURLValue(map) = %q", got)
+	}
+	if got := imageURLValue(nil); got != "" {
+		t.Fatalf("imageURLValue(nil) = %q, want ''", got)
+	}
+}
+
+func TestTextValueKey(t *testing.T) {
+	if got := textValueKey(map[string]any{"text": "hello"}, "text"); got != "hello" {
+		t.Fatalf("textValueKey = %q", got)
+	}
+	if got := textValueKey(map[string]any{"thinking": "thought"}, "thinking"); got != "thought" {
+		t.Fatalf("textValueKey(thinking) = %q", got)
+	}
+	if got := textValueKey(map[string]any{"other": "val"}, "missing"); got != "" {
+		t.Fatalf("textValueKey(missing) = %q, want ''", got)
+	}
+	// When key is "text" but map has "text" key with non-string value
+	if got := textValueKey(map[string]any{"text": 42}, "text"); got != "42" {
+		t.Fatalf("textValueKey(text int) = %q, want 42", got)
+	}
+}
+
+func TestToAnthropicRequestConvertsApplyPatchToolChoice(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model:      "claude-sonnet-4-20250514",
+		Input:      "edit file",
+		ToolChoice: map[string]any{"type": "apply_patch"},
+	}
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest error = %v", err)
+	}
+	choice := got.ToolChoice.(map[string]any)
+	if choice["type"] != "tool" || choice["name"] != "apply_patch" {
+		t.Fatalf("ToolChoice = %v", choice)
+	}
+}
+
+func TestToOpenAIResponseMaxTokensIncomplete(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID:         "msg_1",
+		StopReason: "max_tokens",
+		Content:    []types.AnthropicContentBlock{},
+		Usage:      types.AnthropicUsage{InputTokens: 100, OutputTokens: 50},
+	}
+	got := ToOpenAIResponse(resp, "claude-test")
+	if got.Status != "incomplete" || got.IncompleteDetails.Reason != "max_output_tokens" {
+		t.Fatalf("response = %+v", got)
+	}
+}
+
+func TestToAnthropicRequestConvertsReasoningConfigMaxTokens(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model:     "claude-sonnet-4-20250514",
+		Input:     "think",
+		MaxTokens: 5000,
+		Reasoning: map[string]any{"effort": "low"},
+	}
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest error = %v", err)
+	}
+	thinking := got.Thinking.(map[string]any)
+	if thinking["budget_tokens"].(int) != 3750 {
+		t.Fatalf("budget_tokens = %v, want 3750", thinking["budget_tokens"])
+	}
+}
+
+func TestToAnthropicRequestConvertsTemperatureAndTopP(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	req := &types.OpenAIResponseRequest{
+		Model:       "claude-sonnet-4-20250514",
+		Input:       "hello",
+		Temperature: &temp,
+		TopP:        &topP,
+	}
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest error = %v", err)
+	}
+	if *got.Temperature != 0.7 {
+		t.Fatalf("temperature = %v", *got.Temperature)
+	}
+	if *got.TopP != 0.9 {
+		t.Fatalf("topP = %v", *got.TopP)
+	}
+}
+
+func TestParseJSONOrStringEmpty(t *testing.T) {
+	result := parseJSONOrString("")
+	m, ok := result.(map[string]any)
+	if !ok || len(m) != 0 {
+		t.Fatalf("parseJSONOrString(empty) = %v", result)
+	}
+}

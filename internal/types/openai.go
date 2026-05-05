@@ -14,6 +14,7 @@ type OpenAIResponseRequest struct {
 	Reasoning     any            `json:"reasoning,omitempty"`
 	ParallelCalls *bool          `json:"parallel_tool_calls,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
+	User          string         `json:"user,omitempty"`
 }
 
 // InputMessage represents a message in the input field when it's an array.

@@ -542,6 +542,566 @@ func TestStreamErrorEventsEmitFailedResponseAndError(t *testing.T) {
 	}
 }
 
+func TestResolveModel(t *testing.T) {
+	tests := []struct {
+		name         string
+		defaultModel string
+		inputModel   string
+		want         string
+	}{
+		{"empty default returns input", "", "claude-test", "claude-test"},
+		{"empty input uses default", "default-model", "", "default-model"},
+		{"codex-auto-review uses default", "default-model", "codex-auto-review", "default-model"},
+		{"explicit model overrides", "default-model", "custom-model", "custom-model"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &Handler{DefaultModel: tt.defaultModel}
+			got := h.resolveModel(tt.inputModel)
+			if got != tt.want {
+				t.Fatalf("resolveModel(%q) = %q, want %q", tt.inputModel, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleHealth(t *testing.T) {
+	h := New("https://api.example.com", "key", "model")
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	h.HandleHealth(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("body.status = %q, want ok", body["status"])
+	}
+}
+
+func TestHandleResponsesMethodNotAllowed(t *testing.T) {
+	h := New("https://api.example.com", "key", "model")
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleResponsesInvalidJSON(t *testing.T) {
+	h := New("https://api.example.com", "key", "model")
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("not json"))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleNonStreamUpstreamError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"server_error","message":"boom"}}`)),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestHandleNonStreamTransportError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, http.ErrHandlerTimeout
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+}
+
+func TestHandleStreamUpstreamStatusError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}`)),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+}
+
+func TestHandleStreamTransportError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+}
+
+func TestHandleStreamScannerError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// Return a body that will cause the scanner to fail due to a large token
+		pr, pw := io.Pipe()
+		go func() {
+			pw.Write([]byte("data: " + string(make([]byte, 1024)) + "\n"))
+			pw.Close()
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       pr,
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	// Should complete without panic even with parsing error, and still emit [DONE]
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("body does not contain [DONE]: %q", bodyStr)
+	}
+}
+
+func TestHandleStreamErrorEvent(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		lines := []string{
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n",
+			"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"server overloaded\"}}\n",
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(strings.Join(lines, ""))),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Fatalf("body does not contain [DONE]: %q", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "overloaded_error") {
+		t.Fatalf("body does not contain overloaded_error: %q", bodyStr)
+	}
+}
+
+func TestStreamStringifyToolInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		input any
+		want  string
+	}{
+		{"nil", nil, ""},
+		{"string", "hello", "hello"},
+		{"int", 42, "42"},
+		{"map", map[string]any{"key": "value"}, `{"key":"value"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := streamStringifyToolInput(tt.input)
+			if got != tt.want {
+				t.Fatalf("streamStringifyToolInput(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamCustomToolInput(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain string", "plain", "plain"},
+		{"json with input", `{"input":"content"}`, "content"},
+		{"json input number", `{"input":42}`, "42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := streamCustomToolInput(tt.args)
+			if got != tt.want {
+				t.Fatalf("streamCustomToolInput(%q) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamApplyPatchOperation(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+	}{
+		{"empty", ""},
+		{"direct operation", `{"type":"create_file","path":"a.txt"}`},
+		{"wrapped operation", `{"operation":{"type":"delete_file","path":"old.txt"}}`},
+		{"string value", `"not-json"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := streamApplyPatchOperation(tt.args)
+			if got == nil {
+				t.Fatalf("streamApplyPatchOperation(%q) = nil", tt.args)
+			}
+		})
+	}
+}
+
+func TestStreamWebSearchAction(t *testing.T) {
+	tests := []struct {
+		name string
+		args string
+	}{
+		{"with query", `{"query":"weather"}`},
+		{"empty", ""},
+		{"no query", `{}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := streamWebSearchAction(tt.args)
+			if action["type"] != "search" {
+				t.Fatalf("action type = %v, want search", action["type"])
+			}
+		})
+	}
+}
+
+func TestConvertStreamEventMapsCitations(t *testing.T) {
+	state := newStreamState()
+	idx := 0
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	added := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "text",
+		},
+	}, "claude-test", state)
+	_ = decodeEvent(t, added[0])
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type: "text_delta",
+			Text: "check this",
+		},
+	}, "claude-test", state)
+
+	// Citation without URL should be skipped
+	emptyCite := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type: "citations_delta",
+			Citation: &types.AnthropicCitation{
+				Type:  "char_location",
+				Title: "No URL",
+			},
+		},
+	}, "claude-test", state)
+	if len(emptyCite) != 0 {
+		t.Fatalf("citation without URL emitted events: %v", emptyCite)
+	}
+
+	// Citation with URL
+	cited := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type: "citations_delta",
+			Citation: &types.AnthropicCitation{
+				Type:  "char_location",
+				URL:   "https://example.com",
+				Title: "Example",
+			},
+		},
+	}, "claude-test", state)
+	if len(cited) != 1 {
+		t.Fatalf("citation with URL emitted %d events, want 1", len(cited))
+	}
+	citationEvent := decodeEvent(t, cited[0])
+	if citationEvent["type"] != "response.output_text.annotation.added" {
+		t.Fatalf("citation event type = %v", citationEvent["type"])
+	}
+}
+
+func TestConvertStreamEventContentBlockStartUnknownType(t *testing.T) {
+	state := newStreamState()
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	idx := 0
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "unknown_block_type",
+		},
+	}, "claude-test", state)
+	// Unknown type should not emit events but should allocate an output index
+	if events != nil {
+		t.Fatalf("unknown block type emitted events: %v", events)
+	}
+}
+
+func TestConvertStreamEventMessageStop(t *testing.T) {
+	state := newStreamState()
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_stop",
+	}, "claude-test", state)
+	if events != nil {
+		t.Fatalf("message_stop emitted events: %v", events)
+	}
+}
+
+func TestConvertStreamEventThinkingRedacted(t *testing.T) {
+	state := newStreamState()
+	idx := 0
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	added := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "redacted_thinking",
+			Data: "opaque_1",
+		},
+	}, "claude-test", state)
+	addedItem := decodeEvent(t, added[0])["item"].(map[string]any)
+	if addedItem["type"] != "reasoning" {
+		t.Fatalf("item type = %v, want reasoning", addedItem["type"])
+	}
+
+	// Signature delta
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_delta",
+		Index: &idx,
+		Delta: &types.AnthropicDelta{
+			Type:      "signature_delta",
+			Signature: "sig_redacted",
+		},
+	}, "claude-test", state)
+
+	done := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx,
+	}, "claude-test", state)
+	doneItem := decodeEvent(t, done[0])["item"].(map[string]any)
+	if doneItem["encrypted_content"] != "sig_redacted" {
+		t.Fatalf("encrypted_content = %v, want sig_redacted", doneItem["encrypted_content"])
+	}
+}
+
+func TestHandleResponsesTranslateError(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	body := []byte(`{"model":"claude-test","input":"test","tools":[{"type":"bogus"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleNonStreamAnthropicErrorParsing(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("plain text error")),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestContentBlockStopForServerToolUseSearching(t *testing.T) {
+	state := newStreamState()
+	idx := 1
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "server_tool_use",
+			Name: "web_search",
+		},
+	}, "claude-test", state)
+
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx,
+	}, "claude-test", state)
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1 searching event", len(events))
+	}
+	searchEvent := decodeEvent(t, events[0])
+	if searchEvent["type"] != "response.web_search_call.searching" {
+		t.Fatalf("event type = %v, want response.web_search_call.searching", searchEvent["type"])
+	}
+}
+
+func TestContentBlockStartForWebSearchResult(t *testing.T) {
+	state := newStreamState()
+
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type: "message_start",
+		Message: &types.AnthropicMessageResponse{
+			ID: "msg_1",
+		},
+	}, "claude-test", state)
+
+	// Set up a server_tool_use block first so callIndex is populated
+	idx := 1
+	convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type: "server_tool_use",
+			ID:   "srv_1",
+			Name: "web_search",
+		},
+	}, "claude-test", state)
+
+	// Now add the web_search_tool_result that references it
+	resultIdx := 2
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &resultIdx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type:      "web_search_tool_result",
+			ToolUseID: "srv_1",
+		},
+	}, "claude-test", state)
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2 (completed + output_item.done)", len(events))
+	}
+}
+
+func TestWebSearchResultWithoutPriorCall(t *testing.T) {
+	state := newStreamState()
+	resultIdx := 0
+	events := convertStreamEvent(&types.AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &resultIdx,
+		ContentBlock: &types.AnthropicContentBlock{
+			Type:      "web_search_tool_result",
+			ToolUseID: "unknown_id",
+		},
+	}, "claude-test", state)
+	if events != nil {
+		t.Fatalf("web_search_tool_result without known call emitted events: %v", events)
+	}
+}
+
+func TestHandleNonStreamFailedResponseParse(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("not json")),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+}
+
+func TestHandleStreamNilDelta(t *testing.T) {
+	h := New("https://anthropic.example", "key", "claude-test")
+	h.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		lines := []string{
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n",
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+			"data: {\"type\":\"content_block_delta\",\"index\":0}\n",
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+			"data: {\"type\":\"message_delta\"}\n",
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(strings.Join(lines, ""))),
+		}, nil
+	})}
+	body := []byte(`{"model":"claude-test","input":"test","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleResponses(rec, req)
+	if !strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Fatalf("stream did not complete: %q", rec.Body.String())
+	}
+}
+
 func decodeEvent(t *testing.T, raw string) map[string]any {
 	t.Helper()
 

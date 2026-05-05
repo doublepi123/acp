@@ -32,81 +32,19 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 		anthropicReq.Thinking = thinking
 		anthropicReq.Temperature = nil
 	}
+	if metadata := anthropicMetadata(openaiReq.User, openaiReq.Metadata); metadata != nil {
+		anthropicReq.Metadata = metadata
+	}
 
 	// Convert tools
 	if len(openaiReq.Tools) > 0 {
-		anthropicReq.Tools = make([]types.AnthropicTool, 0, len(openaiReq.Tools))
-		for _, t := range openaiReq.Tools {
-			switch t.Type {
-			case "function", "":
-				name := t.Name
-				description := t.Description
-				parameters := t.Parameters
-				if t.Function != nil {
-					if name == "" {
-						name = t.Function.Name
-					}
-					if description == "" {
-						description = t.Function.Description
-					}
-					if parameters == nil {
-						parameters = t.Function.Parameters
-					}
-				}
-				if name == "" {
-					return nil, fmt.Errorf("function tool missing name")
-				}
-				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Name:        name,
-					Description: description,
-					InputSchema: parameters,
-				})
-			case "custom":
-				if t.Name == "" {
-					return nil, fmt.Errorf("custom tool missing name")
-				}
-				if anthropicReq.CustomTools == nil {
-					anthropicReq.CustomTools = make(map[string]bool)
-				}
-				anthropicReq.CustomTools[t.Name] = true
-				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Name:        t.Name,
-					Description: customToolDescription(t.Description, t.Format),
-					InputSchema: customToolInputSchema(),
-				})
-			case "apply_patch":
-				if anthropicReq.ApplyPatchTools == nil {
-					anthropicReq.ApplyPatchTools = make(map[string]bool)
-				}
-				anthropicReq.ApplyPatchTools["apply_patch"] = true
-				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Name:        "apply_patch",
-					Description: applyPatchToolDescription(),
-					InputSchema: applyPatchToolInputSchema(),
-				})
-			case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
-				allowedDomains := t.AllowedDomains
-				blockedDomains := t.BlockedDomains
-				if t.Filters != nil {
-					if len(t.Filters.AllowedDomains) > 0 {
-						allowedDomains = t.Filters.AllowedDomains
-					}
-					if len(t.Filters.BlockedDomains) > 0 {
-						blockedDomains = t.Filters.BlockedDomains
-					}
-				}
-				anthropicReq.Tools = append(anthropicReq.Tools, types.AnthropicTool{
-					Type:           "web_search_20250305",
-					Name:           "web_search",
-					MaxUses:        t.MaxUses,
-					AllowedDomains: allowedDomains,
-					BlockedDomains: blockedDomains,
-					UserLocation:   t.UserLocation,
-				})
-			default:
-				return nil, fmt.Errorf("unknown tool type: %q", t.Type)
-			}
+		tools, customTools, applyPatchTools, err := convertTools(openaiReq.Tools)
+		if err != nil {
+			return nil, err
 		}
+		anthropicReq.Tools = tools
+		anthropicReq.CustomTools = customTools
+		anthropicReq.ApplyPatchTools = applyPatchTools
 	}
 
 	// Convert tool_choice
@@ -240,9 +178,38 @@ func convertToolChoice(tc any) any {
 		default:
 			return map[string]any{"type": "tool", "name": v}
 		}
+	case map[string]string:
+		switch v["type"] {
+		case "auto":
+			return map[string]any{"type": "auto"}
+		case "none":
+			return map[string]any{"type": "none"}
+		case "required", "any":
+			return map[string]any{"type": "any"}
+		case "tool", "function", "custom":
+			if name := v["name"]; name != "" {
+				return map[string]any{"type": "tool", "name": name}
+			}
+			if v["type"] == "tool" {
+				return map[string]any{"type": "any"}
+			}
+		case "apply_patch":
+			return map[string]any{"type": "tool", "name": "apply_patch"}
+		}
 	case map[string]any:
 		if t, ok := v["type"]; ok {
 			switch t {
+			case "auto":
+				return map[string]any{"type": "auto"}
+			case "none":
+				return map[string]any{"type": "none"}
+			case "required", "any":
+				return map[string]any{"type": "any"}
+			case "tool":
+				if name, ok := v["name"].(string); ok && name != "" {
+					return map[string]any{"type": "tool", "name": name}
+				}
+				return map[string]any{"type": "any"}
 			case "function", "custom", "apply_patch":
 				if t == "apply_patch" {
 					return map[string]any{"type": "tool", "name": "apply_patch"}
