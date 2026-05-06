@@ -612,7 +612,7 @@ func TestToOpenAIResponseConvertsWebSearchCallAndCitations(t *testing.T) {
 		},
 	}
 
-	got := ToOpenAIResponse(resp, "claude-test")
+	got := ToOpenAIResponse(resp, "claude-test", nil, nil)
 	if len(got.Output) != 2 {
 		t.Fatalf("len(Output) = %d, want message plus web_search_call", len(got.Output))
 	}
@@ -883,7 +883,7 @@ func TestToOpenAIResponseConvertsThinkingBlocksToReasoning(t *testing.T) {
 		},
 	}
 
-	got := ToOpenAIResponse(resp, "claude-test")
+	got := ToOpenAIResponse(resp, "claude-test", nil, nil)
 	if len(got.Output) != 2 {
 		t.Fatalf("len(Output) = %d, want reasoning plus function_call", len(got.Output))
 	}
@@ -913,7 +913,7 @@ func TestToOpenAIResponseConvertsCustomToolUse(t *testing.T) {
 		},
 	}
 
-	got := ToOpenAIResponse(resp, "claude-test", map[string]bool{"apply_patch": true})
+	got := ToOpenAIResponse(resp, "claude-test", map[string]bool{"apply_patch": true}, nil)
 	if len(got.Output) != 1 {
 		t.Fatalf("len(Output) = %d, want 1", len(got.Output))
 	}
@@ -1545,7 +1545,7 @@ func TestToOpenAIResponseMaxTokensIncomplete(t *testing.T) {
 		Content:    []types.AnthropicContentBlock{},
 		Usage:      types.AnthropicUsage{InputTokens: 100, OutputTokens: 50},
 	}
-	got := ToOpenAIResponse(resp, "claude-test")
+	got := ToOpenAIResponse(resp, "claude-test", nil, nil)
 	if got.Status != "incomplete" || got.IncompleteDetails.Reason != "max_output_tokens" {
 		t.Fatalf("response = %+v", got)
 	}

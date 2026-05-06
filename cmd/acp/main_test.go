@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -69,12 +70,69 @@ func TestCodexArgsWithProxy(t *testing.T) {
 	}
 }
 
-func TestFindFreePort(t *testing.T) {
-	port, err := findFreePort()
-	if err != nil {
-		t.Fatalf("findFreePort() error = %v", err)
+func TestSetEnvMany(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        []string
+		overrides  map[string]string
+		wantKeyVal map[string]string
+		wantLen    int
+	}{
+		{
+			name:       "empty env",
+			env:        nil,
+			overrides:  map[string]string{"FOO": "bar"},
+			wantKeyVal: map[string]string{"FOO": "bar"},
+			wantLen:    1,
+		},
+		{
+			name:       "override existing",
+			env:        []string{"FOO=old", "BAR=baz"},
+			overrides:  map[string]string{"FOO": "new"},
+			wantKeyVal: map[string]string{"FOO": "new", "BAR": "baz"},
+			wantLen:    2,
+		},
+		{
+			name:       "add new key",
+			env:        []string{"EXISTING=val"},
+			overrides:  map[string]string{"NEW": "val"},
+			wantKeyVal: map[string]string{"EXISTING": "val", "NEW": "val"},
+			wantLen:    2,
+		},
+		{
+			name:       "remove duplicate keys",
+			env:        []string{"KEY=first", "KEY=second"},
+			overrides:  map[string]string{"KEY": "third"},
+			wantKeyVal: map[string]string{"KEY": "third"},
+			wantLen:    1,
+		},
+		{
+			name:       "no overrides",
+			env:        []string{"A=1", "B=2"},
+			overrides:  map[string]string{},
+			wantKeyVal: map[string]string{"A": "1", "B": "2"},
+			wantLen:    2,
+		},
 	}
-	if port <= 0 || port > 65535 {
-		t.Fatalf("findFreePort() = %d, want valid port", port)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := setEnvMany(tt.env, tt.overrides)
+			if len(result) != tt.wantLen {
+				t.Fatalf("len(result) = %d, want %d", len(result), tt.wantLen)
+			}
+			got := make(map[string]string)
+			for _, e := range result {
+				k, v, ok := strings.Cut(e, "=")
+				if !ok {
+					t.Fatalf("malformed env entry: %q", e)
+				}
+				got[k] = v
+			}
+			for k, wantV := range tt.wantKeyVal {
+				if got[k] != wantV {
+					t.Fatalf("got %s=%q, want %s=%q", k, got[k], k, wantV)
+				}
+			}
+		})
 	}
 }

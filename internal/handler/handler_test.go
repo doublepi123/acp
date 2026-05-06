@@ -81,7 +81,7 @@ func TestHandleResponsesConvertsApplyPatchToolCall(t *testing.T) {
 }
 
 func TestConvertStreamEventUsesStableResponseAndItemIDs(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 0
 
 	created := convertStreamEvent(&types.AnthropicStreamEvent{
@@ -147,7 +147,7 @@ func TestConvertStreamEventUsesStableResponseAndItemIDs(t *testing.T) {
 }
 
 func TestConvertStreamEventAccumulatesFunctionArguments(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 1
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -202,7 +202,7 @@ func TestConvertStreamEventAccumulatesFunctionArguments(t *testing.T) {
 }
 
 func TestConvertStreamEventMapsCustomToolCall(t *testing.T) {
-	state := newStreamState(map[string]bool{"apply_patch": true})
+	state := newStreamState(map[string]bool{"apply_patch": true}, nil)
 	idx := 1
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -310,7 +310,7 @@ func TestConvertStreamEventMapsApplyPatchCall(t *testing.T) {
 }
 
 func TestConvertStreamEventAccumulatesThinkingAsReasoning(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 0
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -372,7 +372,7 @@ func TestConvertStreamEventAccumulatesThinkingAsReasoning(t *testing.T) {
 }
 
 func TestConvertStreamEventMapsServerWebSearchWithoutFunctionCall(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 1
 	resultIdx := 2
 
@@ -451,7 +451,7 @@ func TestConvertStreamEventMapsServerWebSearchWithoutFunctionCall(t *testing.T) 
 }
 
 func TestStreamOutputIndicesNoGapsAfterSkippedBlock(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
 		Type: "message_start",
@@ -516,7 +516,7 @@ func TestNewHandlerDoesNotUseTotalClientTimeout(t *testing.T) {
 }
 
 func TestStreamErrorEventsEmitFailedResponseAndError(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	state.responseID = "resp_1"
 	events := streamErrorEvents(state, "claude-test", "stream_error", "upstream interrupted")
 	if len(events) != 2 {
@@ -800,7 +800,7 @@ func TestStreamWebSearchAction(t *testing.T) {
 }
 
 func TestConvertStreamEventMapsCitations(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 0
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -867,7 +867,7 @@ func TestConvertStreamEventMapsCitations(t *testing.T) {
 }
 
 func TestConvertStreamEventContentBlockStartUnknownType(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	convertStreamEvent(&types.AnthropicStreamEvent{
 		Type: "message_start",
 		Message: &types.AnthropicMessageResponse{
@@ -890,7 +890,7 @@ func TestConvertStreamEventContentBlockStartUnknownType(t *testing.T) {
 }
 
 func TestConvertStreamEventMessageStop(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	events := convertStreamEvent(&types.AnthropicStreamEvent{
 		Type: "message_stop",
 	}, "claude-test", state)
@@ -900,7 +900,7 @@ func TestConvertStreamEventMessageStop(t *testing.T) {
 }
 
 func TestConvertStreamEventThinkingRedacted(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 0
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -973,7 +973,7 @@ func TestHandleNonStreamAnthropicErrorParsing(t *testing.T) {
 }
 
 func TestContentBlockStopForServerToolUseSearching(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	idx := 1
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
@@ -1006,7 +1006,7 @@ func TestContentBlockStopForServerToolUseSearching(t *testing.T) {
 }
 
 func TestContentBlockStartForWebSearchResult(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 
 	convertStreamEvent(&types.AnthropicStreamEvent{
 		Type: "message_start",
@@ -1043,7 +1043,7 @@ func TestContentBlockStartForWebSearchResult(t *testing.T) {
 }
 
 func TestWebSearchResultWithoutPriorCall(t *testing.T) {
-	state := newStreamState()
+	state := newStreamState(nil, nil)
 	resultIdx := 0
 	events := convertStreamEvent(&types.AnthropicStreamEvent{
 		Type:  "content_block_start",
@@ -1110,4 +1110,92 @@ func decodeEvent(t *testing.T, raw string) map[string]any {
 		t.Fatalf("json.Unmarshal(%q): %v", raw, err)
 	}
 	return event
+}
+
+func TestCheckAuthCaseInsensitive(t *testing.T) {
+	h := New("https://api.example.com", "key", "model")
+	h.WithProxyToken("my-secret")
+
+	tests := []struct {
+		name string
+		auth string
+		want bool
+	}{
+		{"exact case", "Bearer my-secret", true},
+		{"lowercase bearer", "bearer my-secret", true},
+		{"mixed case", "BEARER my-secret", true},
+		{"wrong token", "Bearer wrong", false},
+		{"no auth", "", false},
+		{"basic auth", "Basic dXNlcjpwYXNz", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
+			if got := h.checkAuth(req); got != tt.want {
+				t.Fatalf("checkAuth(%q) = %v, want %v", tt.auth, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetAnthropicHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		req        *types.AnthropicMessageRequest
+		wantBeta   string
+		wantNoBeta bool
+	}{
+		{
+			name:       "no beta features",
+			req:        &types.AnthropicMessageRequest{},
+			wantNoBeta: true,
+		},
+		{
+			name: "thinking enabled",
+			req: &types.AnthropicMessageRequest{
+				Thinking: map[string]any{"type": "enabled", "budget_tokens": 1024},
+			},
+			wantBeta: "extended-thinking-2025-04-11",
+		},
+		{
+			name: "web search tool",
+			req: &types.AnthropicMessageRequest{
+				Tools: []types.AnthropicTool{{Type: "web_search_20250305", Name: "web_search"}},
+			},
+			wantBeta: "web-search-2025-03-05",
+		},
+		{
+			name: "both thinking and web search",
+			req: &types.AnthropicMessageRequest{
+				Thinking: map[string]any{"type": "enabled"},
+				Tools:    []types.AnthropicTool{{Type: "web_search_20250305", Name: "web_search"}},
+			},
+			wantBeta: "extended-thinking-2025-04-11,web-search-2025-03-05",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, "http://example.com", nil)
+			setAnthropicHeaders(req, "test-key", tt.req)
+			if v := req.Header.Get("x-api-key"); v != "test-key" {
+				t.Fatalf("x-api-key = %q, want test-key", v)
+			}
+			if v := req.Header.Get("anthropic-version"); v != anthropicVersion {
+				t.Fatalf("anthropic-version = %q, want %q", v, anthropicVersion)
+			}
+			gotBeta := req.Header.Get("anthropic-beta")
+			if tt.wantNoBeta {
+				if gotBeta != "" {
+					t.Fatalf("anthropic-beta = %q, want empty", gotBeta)
+				}
+			} else {
+				if gotBeta != tt.wantBeta {
+					t.Fatalf("anthropic-beta = %q, want %q", gotBeta, tt.wantBeta)
+				}
+			}
+		})
+	}
 }

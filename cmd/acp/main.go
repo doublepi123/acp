@@ -149,12 +149,11 @@ func runCodex() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env,
-		fmt.Sprintf("CODEX_HOME=%s", codexHome),
-		fmt.Sprintf("OPENAI_BASE_URL=http://localhost:%d/v1", port),
-		"OPENAI_API_KEY=acp-proxy",
-	)
+	cmd.Env = setEnvMany(os.Environ(), map[string]string{
+		"CODEX_HOME":       codexHome,
+		"OPENAI_BASE_URL":  fmt.Sprintf("http://localhost:%d/v1", port),
+		"OPENAI_API_KEY":   "acp-proxy",
+	})
 
 	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -247,13 +246,33 @@ func hasCodexModelArg(args []string) bool {
 	return false
 }
 
-func findFreePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
+// setEnvMany returns a new environment slice with the given keys set to the
+// given values. Existing entries for those keys are replaced (last occurrence
+// wins on most platforms, but we remove all prior occurrences to avoid ambiguity).
+func setEnvMany(env []string, overrides map[string]string) []string {
+	prefixes := make([]string, 0, len(overrides))
+	for k := range overrides {
+		prefixes = append(prefixes, k+"=")
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
+	filtered := env[:0]
+	for _, e := range env {
+		keep := true
+		for _, p := range prefixes {
+			if strings.HasPrefix(e, p) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			filtered = append(filtered, e)
+		}
+	}
+	result := make([]string, len(filtered), len(filtered)+len(overrides))
+	copy(result, filtered)
+	for k, v := range overrides {
+		result = append(result, k+"="+v)
+	}
+	return result
 }
 
 func waitForReady(port int, timeout time.Duration) bool {

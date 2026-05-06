@@ -128,13 +128,6 @@ func TestWaitForReady(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// This is hard to test directly since waitForReady takes port param
-	// We can test indirectly through findFreePort + a real server
-	port, err := findFreePort()
-	if err != nil {
-		t.Fatalf("findFreePort error = %v", err)
-	}
-	_ = port
 	// waitForReady with an invalid port should return false
 	if waitForReady(1, 50*time.Millisecond) {
 		t.Fatalf("waitForReady on port 1 should timeout")

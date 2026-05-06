@@ -835,20 +835,6 @@ func webSearchAction(input any) any {
 	return action
 }
 
-func customToolSet(customToolNames ...map[string]bool) map[string]bool {
-	if len(customToolNames) == 0 || customToolNames[0] == nil {
-		return map[string]bool{}
-	}
-	return customToolNames[0]
-}
-
-func applyPatchToolSet(toolNames ...map[string]bool) map[string]bool {
-	if len(toolNames) < 2 || toolNames[1] == nil {
-		return map[string]bool{}
-	}
-	return toolNames[1]
-}
-
 func customToolInput(input any) string {
 	switch v := input.(type) {
 	case string:
@@ -900,10 +886,14 @@ func stringifyToolInput(input any) string {
 }
 
 // ToOpenAIResponse converts an Anthropic response to an OpenAI Response API response.
-func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string, customToolNames ...map[string]bool) *types.OpenAIResponse {
+func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model string, customTools, applyPatchTools map[string]bool) *types.OpenAIResponse {
 	output := make([]types.OutputItem, 0)
-	customTools := customToolSet(customToolNames...)
-	applyPatchTools := applyPatchToolSet(customToolNames...)
+	if customTools == nil {
+		customTools = map[string]bool{}
+	}
+	if applyPatchTools == nil {
+		applyPatchTools = map[string]bool{}
+	}
 
 	textContent := ""
 	webSearchCalls := make([]types.OutputItem, 0)

@@ -19,6 +19,8 @@ import (
 
 const maxRequestBodyBytes = 64 << 20
 
+const anthropicVersion = "2023-06-01"
+
 // Handler handles HTTP requests, proxying OpenAI Response API to Anthropic.
 type Handler struct {
 	AnthropicURL string
@@ -34,7 +36,13 @@ func New(anthropicURL, anthropicKey, defaultModel string) *Handler {
 		AnthropicURL: anthropicURL,
 		AnthropicKey: anthropicKey,
 		DefaultModel: defaultModel,
-		HTTPClient:   &http.Client{},
+		HTTPClient: &http.Client{
+			Transport: &http.Transport{
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:  10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+			},
+		},
 	}
 }
 
@@ -99,6 +107,26 @@ func (h *Handler) messagesURL() string {
 	return strings.TrimRight(h.AnthropicURL, "/") + "/v1/messages"
 }
 
+func setAnthropicHeaders(req *http.Request, key string, anthropicReq *types.AnthropicMessageRequest) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", anthropicVersion)
+
+	var betas []string
+	if anthropicReq.Thinking != nil {
+		betas = append(betas, "extended-thinking-2025-04-11")
+	}
+	for _, t := range anthropicReq.Tools {
+		if t.Type == translate.AnthropicWebSearchToolType {
+			betas = append(betas, "web-search-2025-03-05")
+			break
+		}
+	}
+	if len(betas) > 0 {
+		req.Header.Set("anthropic-beta", strings.Join(betas, ","))
+	}
+}
+
 func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, anthropicReq *types.AnthropicMessageRequest, model string) {
 	reqBody, err := json.Marshal(anthropicReq)
 	if err != nil {
@@ -114,9 +142,7 @@ func (h *Handler) handleNonStream(ctx context.Context, w http.ResponseWriter, an
 		return
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", h.AnthropicKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	setAnthropicHeaders(req, h.AnthropicKey, anthropicReq)
 
 	resp, err := h.HTTPClient.Do(req)
 	if err != nil {
@@ -166,9 +192,7 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 		return
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", h.AnthropicKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	setAnthropicHeaders(req, h.AnthropicKey, anthropicReq)
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := h.HTTPClient.Do(req)
@@ -231,11 +255,15 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 					message = event.Error.Message
 				}
 			}
-			writeStreamEvents(w, flusher, streamErrorEvents(state, model, code, message))
+			if !writeStreamEvents(w, flusher, streamErrorEvents(state, model, code, message)) {
+				return
+			}
 			break
 		}
 
-		writeStreamEvents(w, flusher, convertStreamEvent(&event, model, state))
+		if !writeStreamEvents(w, flusher, convertStreamEvent(&event, model, state)) {
+			return
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -272,16 +300,14 @@ type streamState struct {
 	applyPatchTools map[string]bool
 }
 
-func newStreamState(customToolNames ...map[string]bool) *streamState {
+func newStreamState(customTools, applyPatchTools map[string]bool) *streamState {
 	now := time.Now()
 	fallbackID := fmt.Sprintf("resp_%d", now.UnixNano())
-	customTools := map[string]bool{}
-	if len(customToolNames) > 0 && customToolNames[0] != nil {
-		customTools = customToolNames[0]
+	if customTools == nil {
+		customTools = map[string]bool{}
 	}
-	applyPatchTools := map[string]bool{}
-	if len(customToolNames) > 1 && customToolNames[1] != nil {
-		applyPatchTools = customToolNames[1]
+	if applyPatchTools == nil {
+		applyPatchTools = map[string]bool{}
 	}
 	return &streamState{
 		responseID:      fallbackID,
@@ -335,17 +361,18 @@ func (s *streamState) event(fields map[string]any) string {
 	return string(b)
 }
 
-func writeStreamEvents(w http.ResponseWriter, flusher http.Flusher, events []string) {
+func writeStreamEvents(w http.ResponseWriter, flusher http.Flusher, events []string) bool {
 	for _, sseEvent := range events {
 		if sseEvent == "" {
 			continue
 		}
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", sseEvent); err != nil {
 			log.Printf("Failed to write stream event: %v", err)
-			return
+			return false
 		}
 		flusher.Flush()
 	}
+	return true
 }
 
 func streamErrorEvents(state *streamState, model, code, message string) []string {
@@ -885,6 +912,9 @@ func (h *Handler) checkAuth(r *http.Request) bool {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
-	token, ok := strings.CutPrefix(auth, "Bearer ")
-	return ok && token == h.ProxyToken
+	scheme, token, ok := strings.Cut(auth, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+	return token == h.ProxyToken
 }

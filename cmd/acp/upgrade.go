@@ -45,7 +45,7 @@ func runUpgrade() {
 
 	// Fetch latest release tag if not specified
 	if opts.Tag == "" || opts.Tag == "latest" {
-		client := &http.Client{Timeout: 30 * 1000000000}
+		client := &http.Client{Timeout: 30 * time.Second}
 		latestTag, err := latestReleaseTag(context.Background(), client, opts.GitHubBaseURL, opts.Repo)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not fetch latest release: %v\n", err)
@@ -337,9 +337,22 @@ func replaceExecutable(targetPath string, data []byte) error {
 		return fmt.Errorf("closing temporary binary: %w", err)
 	}
 
+	// On Windows the running binary is locked and cannot be overwritten.
+	// Rename the old binary out of the way first, then rename the new one in.
+	// On Unix this is still atomic from the perspective of new processes.
 	if err := os.Rename(tmpPath, targetPath); err != nil {
-		cleanup()
-		return fmt.Errorf("replacing %s: %w", targetPath, err)
+		// If direct rename fails (e.g. Windows: file in use), try rename-swap.
+		backup := targetPath + ".old"
+		os.Remove(backup) // remove any leftover backup
+		if renameErr := os.Rename(targetPath, backup); renameErr != nil {
+			cleanup()
+			return fmt.Errorf("replacing %s: %w (rename old: %w)", targetPath, err, renameErr)
+		}
+		os.Remove(backup) // best-effort cleanup
+		if err := os.Rename(tmpPath, targetPath); err != nil {
+			cleanup()
+			return fmt.Errorf("replacing %s: %w", targetPath, err)
+		}
 	}
 
 	return nil
