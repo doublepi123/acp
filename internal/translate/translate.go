@@ -645,7 +645,7 @@ func convertContentBlock(item any) *types.AnthropicContentBlock {
 			Signature: textValueKey(m, "signature"),
 		}
 	case "redacted_thinking":
-		return nil
+		return &types.AnthropicContentBlock{Type: "redacted_thinking", Data: textValueKey(m, "data")}
 	case "image_url":
 		return imageBlock(imageURLValue(m["image_url"]))
 	case "input_image":
@@ -815,7 +815,7 @@ func citationRange(text, citedText string, startIndex int) (int, int) {
 	}
 	pos := strings.Index(text, citedText)
 	if pos < 0 {
-		return startIndex, startIndex + utf8.RuneCountInString(text)
+		return startIndex, startIndex
 	}
 	prefixLen := utf8.RuneCountInString(text[:pos])
 	citedLen := utf8.RuneCountInString(citedText)
@@ -963,7 +963,6 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 		}
 	}
 
-	output = append(output, webSearchCalls...)
 	output = append(output, reasoningItems...)
 
 	if textContent != "" {
@@ -984,6 +983,7 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 	}
 
 	output = append(output, functionCalls...)
+	output = append(output, webSearchCalls...)
 
 	status := "completed"
 	var incompleteDetails *types.IncompleteDetails

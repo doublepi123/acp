@@ -938,8 +938,8 @@ func TestConvertStreamEventThinkingRedacted(t *testing.T) {
 		Index: &idx,
 	}, "claude-test", state)
 	doneItem := decodeEvent(t, done[0])["item"].(map[string]any)
-	if doneItem["encrypted_content"] != "sig_redacted" {
-		t.Fatalf("encrypted_content = %v, want sig_redacted", doneItem["encrypted_content"])
+	if doneItem["encrypted_content"] != "opaque_1sig_redacted" {
+		t.Fatalf("encrypted_content = %v, want opaque_1sig_redacted", doneItem["encrypted_content"])
 	}
 }
 

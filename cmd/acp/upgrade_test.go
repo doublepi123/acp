@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -580,13 +583,16 @@ func TestUpgradeFull(t *testing.T) {
 		t.Fatalf("gzip Close: %v", err)
 	}
 
+	archiveBytes := buf.Bytes()
+	hash := sha256.Sum256(archiveBytes)
+	checksumLine := fmt.Sprintf("%s  acp-linux-amd64.tar.gz\n", hex.EncodeToString(hash[:]))
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
-			// Skip checksum verification by returning empty
-			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(checksumLine))
 			return
 		}
-		w.Write(buf.Bytes())
+		w.Write(archiveBytes)
 	}))
 	defer srv.Close()
 
@@ -692,12 +698,16 @@ func TestUpgradeZip(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
+	archiveBytes := buf.Bytes()
+	hash := sha256.Sum256(archiveBytes)
+	checksumLine := fmt.Sprintf("%s  acp-windows-amd64.zip\n", hex.EncodeToString(hash[:]))
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
-			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(checksumLine))
 			return
 		}
-		w.Write(buf.Bytes())
+		w.Write(archiveBytes)
 	}))
 	defer srv.Close()
 

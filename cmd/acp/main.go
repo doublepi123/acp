@@ -53,6 +53,9 @@ func runServe() {
 	}
 
 	h := handler.New(cfg.AnthropicURL, cfg.AnthropicKey, cfg.DefaultModel)
+	if token := os.Getenv("ACP_PROXY_TOKEN"); token != "" {
+		h.WithProxyToken(token)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", h.HandleResponses)
 	mux.HandleFunc("/health", h.HandleHealth)
@@ -92,17 +95,21 @@ func runCodex() {
 	}
 
 	// Find a free port
-	port, err := findFreePort()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatalf("failed to find free port: %v", err)
 	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	h := handler.New(cfg.AnthropicURL, cfg.AnthropicKey, cfg.DefaultModel)
+	if token := os.Getenv("ACP_PROXY_TOKEN"); token != "" {
+		h.WithProxyToken(token)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", h.HandleResponses)
 	mux.HandleFunc("/health", h.HandleHealth)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -111,11 +118,11 @@ func runCodex() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Start proxy in background
+	// Start proxy in background on already-bound listener (avoids TOCTOU race)
 	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("acp proxy started on http://%s (model: %s)", addr, cfg.DefaultModel)
-		serverErr <- srv.ListenAndServe()
+		serverErr <- srv.Serve(listener)
 	}()
 
 	// Wait for proxy to be ready

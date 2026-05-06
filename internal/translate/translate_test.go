@@ -425,7 +425,7 @@ func TestToAnthropicRequestDropsOpaqueOnlyReasoning(t *testing.T) {
 	}
 }
 
-func TestToAnthropicRequestDropsRedactedThinkingContentBlock(t *testing.T) {
+func TestToAnthropicRequestPreservesRedactedThinkingContentBlock(t *testing.T) {
 	req := &types.OpenAIResponseRequest{
 		Model: "claude-sonnet-4-20250514",
 		Input: []any{
@@ -445,12 +445,12 @@ func TestToAnthropicRequestDropsRedactedThinkingContentBlock(t *testing.T) {
 		t.Fatalf("ToAnthropicRequest returned error: %v", err)
 	}
 	blocks := got.Messages[0].Content.([]types.AnthropicContentBlock)
-	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "visible" {
-		t.Fatalf("blocks = %#v, want only visible text", blocks)
+	if len(blocks) != 2 || blocks[0].Type != "redacted_thinking" || blocks[0].Data != "opaque_1" || blocks[1].Type != "text" || blocks[1].Text != "visible" {
+		t.Fatalf("blocks = %#v, want redacted_thinking and text", blocks)
 	}
 }
 
-func TestToAnthropicRequestDropsRedactedOnlyContentMessage(t *testing.T) {
+func TestToAnthropicRequestPreservesRedactedOnlyContentMessage(t *testing.T) {
 	req := &types.OpenAIResponseRequest{
 		Model: "claude-sonnet-4-20250514",
 		Input: []any{
@@ -475,8 +475,12 @@ func TestToAnthropicRequestDropsRedactedOnlyContentMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToAnthropicRequest returned error: %v", err)
 	}
-	if len(got.Messages) != 1 || got.Messages[0].Role != "user" {
-		t.Fatalf("messages = %#v, want only user message", got.Messages)
+	if len(got.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2 (user + assistant with redacted_thinking)", len(got.Messages))
+	}
+	blocks := got.Messages[1].Content.([]types.AnthropicContentBlock)
+	if len(blocks) != 1 || blocks[0].Type != "redacted_thinking" || blocks[0].Data != "opaque_1" {
+		t.Fatalf("blocks = %#v, want redacted_thinking", blocks)
 	}
 }
 
@@ -610,17 +614,21 @@ func TestToOpenAIResponseConvertsWebSearchCallAndCitations(t *testing.T) {
 
 	got := ToOpenAIResponse(resp, "claude-test")
 	if len(got.Output) != 2 {
-		t.Fatalf("len(Output) = %d, want web_search_call plus message", len(got.Output))
+		t.Fatalf("len(Output) = %d, want message plus web_search_call", len(got.Output))
 	}
-	if got.Output[0].Type != "web_search_call" || got.Output[0].ID != "srvtoolu_1" || got.Output[0].Status != "completed" {
-		t.Fatalf("web search item = %#v, want completed web_search_call", got.Output[0])
+	// Message comes before web_search_calls in output order
+	if got.Output[0].Type != "message" || got.Output[0].Status != "completed" {
+		t.Fatalf("output[0] = %#v, want message", got.Output[0])
 	}
-	action := got.Output[0].Action.(map[string]any)
+	if got.Output[1].Type != "web_search_call" || got.Output[1].ID != "srvtoolu_1" || got.Output[1].Status != "completed" {
+		t.Fatalf("web search item = %#v, want completed web_search_call", got.Output[1])
+	}
+	action := got.Output[1].Action.(map[string]any)
 	if action["type"] != "search" || action["query"] != "weather" {
 		t.Fatalf("web search action = %#v, want search query", action)
 	}
 
-	content := got.Output[1].Content.([]map[string]any)
+	content := got.Output[0].Content.([]map[string]any)
 	annotations := content[0]["annotations"].([]map[string]any)
 	if len(annotations) != 1 || annotations[0]["url"] != "https://example.com" || annotations[0]["title"] != "Example" {
 		t.Fatalf("annotations = %#v, want url citation", annotations)
@@ -1353,10 +1361,10 @@ func TestCitationRange(t *testing.T) {
 	if start != 6 || end != 11 {
 		t.Fatalf("citationRange = %d, %d, want 6, 11", start, end)
 	}
-	// no match, fallback to full text
+	// no match, return zero-length range
 	start, end = citationRange("hello", "world", 10)
-	if start != 10 || end != 15 {
-		t.Fatalf("citationRange no match = %d, %d, want 10, 15", start, end)
+	if start != 10 || end != 10 {
+		t.Fatalf("citationRange no match = %d, %d, want 10, 10", start, end)
 	}
 	// empty cited text
 	start, end = citationRange("hello", "", 5)

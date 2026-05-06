@@ -24,6 +24,7 @@ type Handler struct {
 	AnthropicURL string
 	AnthropicKey string
 	DefaultModel string
+	ProxyToken   string
 	HTTPClient   *http.Client
 }
 
@@ -37,19 +38,29 @@ func New(anthropicURL, anthropicKey, defaultModel string) *Handler {
 	}
 }
 
+// WithProxyToken sets an optional bearer token that clients must provide.
+func (h *Handler) WithProxyToken(token string) *Handler {
+	h.ProxyToken = token
+	return h
+}
+
 // HandleResponses handles POST /v1/responses
 func (h *Handler) HandleResponses(w http.ResponseWriter, r *http.Request) {
+	if !h.checkAuth(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized: invalid or missing bearer token")
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
+	defer r.Body.Close()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
-	defer r.Body.Close()
 
 	var openaiReq types.OpenAIResponseRequest
 	if err := json.Unmarshal(body, &openaiReq); err != nil {
@@ -146,6 +157,8 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 		writeError(w, http.StatusInternalServerError, "failed to marshal request")
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.messagesURL(), bytes.NewReader(reqBody))
 	if err != nil {
@@ -173,18 +186,18 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 		return
 	}
 
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported on this server")
+		return
+	}
+
 	// Set up SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		log.Printf("Streaming not supported")
-		return
-	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -193,11 +206,13 @@ func (h *Handler) handleStream(ctx context.Context, w http.ResponseWriter, anthr
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			data, ok = strings.CutPrefix(line, "data:")
+			if !ok {
+				continue
+			}
 		}
-
-		data := strings.TrimPrefix(line, "data: ")
 		var event types.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			log.Printf("Failed to parse stream event: %v", err)
@@ -605,7 +620,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 			state.thinking[idx] += event.Delta.Thinking
 			return nil
 		case "signature_delta":
-			state.signatures[idx] = event.Delta.Signature
+			state.signatures[idx] += event.Delta.Signature
 			return nil
 		case "text_delta":
 			state.text[idx] += event.Delta.Text
@@ -857,6 +872,19 @@ func writeAnthropicError(w http.ResponseWriter, status int, body []byte) {
 
 // HandleHealth handles health check.
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	if !h.checkAuth(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized: invalid or missing bearer token")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (h *Handler) checkAuth(r *http.Request) bool {
+	if h.ProxyToken == "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	token, ok := strings.CutPrefix(auth, "Bearer ")
+	return ok && token == h.ProxyToken
 }

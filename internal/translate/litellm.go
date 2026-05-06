@@ -8,6 +8,9 @@ import (
 	"github.com/doublepi123/acp/internal/types"
 )
 
+// AnthropicWebSearchToolType is the Anthropic web search tool type version.
+const AnthropicWebSearchToolType = "web_search_20250305"
+
 var (
 	anthropicUserEmailPattern = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 	anthropicUserPhonePattern = regexp.MustCompile(`^\+?[\d\s()\-]{7,}$`)
@@ -131,7 +134,7 @@ func webSearchTool(t types.Tool) types.AnthropicTool {
 		maxUses = webSearchMaxUses(t.SearchContextSize)
 	}
 	return types.AnthropicTool{
-		Type:           "web_search_20250305",
+		Type:           AnthropicWebSearchToolType,
 		Name:           "web_search",
 		MaxUses:        maxUses,
 		AllowedDomains: allowedDomains,

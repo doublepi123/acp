@@ -2,9 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // ClaudeSettings mirrors ~/.claude/settings.json
@@ -57,7 +61,27 @@ func Load() *Config {
 		cfg.DefaultModel = "claude-sonnet-4-20250514"
 	}
 
+	if err := validateConfig(cfg); err != nil {
+		log.Printf("Configuration warning: %v", err)
+	}
+
 	return cfg
+}
+
+func validateConfig(cfg *Config) error {
+	if port, err := strconv.Atoi(cfg.Port); err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid PORT %q: must be a number between 1 and 65535", cfg.Port)
+	}
+
+	u, err := url.Parse(cfg.AnthropicURL)
+	if err != nil {
+		return fmt.Errorf("invalid ANTHROPIC_BASE_URL %q: %w", cfg.AnthropicURL, err)
+	}
+	if u.Scheme != "https" && !strings.HasPrefix(u.Host, "localhost") && !strings.HasPrefix(u.Host, "127.0.0.1") {
+		return fmt.Errorf("ANTHROPIC_BASE_URL %q does not use HTTPS; API key may be sent in cleartext", cfg.AnthropicURL)
+	}
+
+	return nil
 }
 
 func loadClaudeSettings() *ClaudeSettings {

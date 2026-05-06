@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -112,7 +113,8 @@ func upgrade(opts upgradeOptions) error {
 	fmt.Printf("Downloading %s %s for %s/%s...\n", opts.Project, opts.Tag, opts.GOOS, opts.GOARCH)
 	fmt.Printf("Release asset: %s\n", url)
 
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("downloading release: %w", err)
 	}
@@ -266,22 +268,20 @@ func extractBinaryZip(r io.ReaderAt, size int64, command string) ([]byte, error)
 func verifyChecksum(opts upgradeOptions, asset string, data []byte) error {
 	checksumAsset := "checksums.txt"
 	checksumURL := releaseDownloadURL(opts.GitHubBaseURL, opts.Repo, opts.Tag, checksumAsset)
-	resp, err := http.Get(checksumURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(checksumURL)
 	if err != nil {
-		fmt.Printf("Warning: could not download checksums: %v\n", err)
-		return nil
+		return fmt.Errorf("failed to download checksums: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Warning: checksums.txt not available (HTTP %d), skipping verification\n", resp.StatusCode)
-		return nil
+		return fmt.Errorf("checksums.txt not available (HTTP %d)", resp.StatusCode)
 	}
 
 	checksumData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Printf("Warning: could not read checksums: %v\n", err)
-		return nil
+		return fmt.Errorf("failed to read checksums: %w", err)
 	}
 
 	hash := sha256.Sum256(data)
@@ -297,8 +297,7 @@ func verifyChecksum(opts upgradeOptions, asset string, data []byte) error {
 	}
 
 	if expected == "" {
-		fmt.Printf("Warning: %s not found in checksums.txt, skipping verification\n", asset)
-		return nil
+		return fmt.Errorf("%s not found in checksums.txt", asset)
 	}
 
 	if actual != expected {
