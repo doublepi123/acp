@@ -515,8 +515,9 @@ func TestToAnthropicRequestHandlesMalformedToolChoice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToAnthropicRequest returned error: %v", err)
 	}
-	if got.ToolChoice != nil {
-		t.Fatalf("ToolChoice = %#v, want nil for malformed input", got.ToolChoice)
+	choice, ok := got.ToolChoice.(map[string]any)
+	if !ok || choice["type"] != "auto" {
+		t.Fatalf("ToolChoice = %#v, want type=auto for malformed input", got.ToolChoice)
 	}
 }
 
@@ -1037,19 +1038,13 @@ func TestConvertToolChoice(t *testing.T) {
 		{"specific name", "lookup", map[string]any{"type": "tool", "name": "lookup"}},
 		{"apply_patch map", map[string]any{"type": "apply_patch"}, map[string]any{"type": "tool", "name": "apply_patch"}},
 		{"custom map", map[string]any{"type": "custom", "name": "my_tool"}, map[string]any{"type": "tool", "name": "my_tool"}},
-		{"function map no name", map[string]any{"type": "function"}, nil},
+		{"function map no name", map[string]any{"type": "function"}, map[string]any{"type": "auto"}},
 		{"function map with function.name", map[string]any{"type": "function", "function": map[string]any{"name": "fn"}}, map[string]any{"type": "tool", "name": "fn"}},
-		{"function map with function no name", map[string]any{"type": "function", "function": map[string]any{}}, nil},
+		{"function map with function no name", map[string]any{"type": "function", "function": map[string]any{}}, map[string]any{"type": "auto"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := convertToolChoice(tt.tc)
-			if tt.want == nil {
-				if got != nil {
-					t.Fatalf("convertToolChoice(%v) = %v, want nil", tt.tc, got)
-				}
-				return
-			}
 			m, ok := got.(map[string]any)
 			if !ok {
 				t.Fatalf("convertToolChoice(%v) = %T, want map", tt.tc, got)
@@ -1563,8 +1558,9 @@ func TestToAnthropicRequestConvertsReasoningConfigMaxTokens(t *testing.T) {
 		t.Fatalf("ToAnthropicRequest error = %v", err)
 	}
 	thinking := got.Thinking.(map[string]any)
-	if thinking["budget_tokens"].(int) != 3750 {
-		t.Fatalf("budget_tokens = %v, want 3750", thinking["budget_tokens"])
+	// low effort: min(maxTokens*1/4, 2000) = min(1250, 2000) = 1250
+	if thinking["budget_tokens"].(int) != 1250 {
+		t.Fatalf("budget_tokens = %v, want 1250", thinking["budget_tokens"])
 	}
 }
 
@@ -1594,5 +1590,114 @@ func TestParseJSONOrStringEmpty(t *testing.T) {
 	m, ok := result.(map[string]any)
 	if !ok || len(m) != 0 {
 		t.Fatalf("parseJSONOrString(empty) = %v", result)
+	}
+}
+
+func TestConvertReasoningConfigEffortLevels(t *testing.T) {
+	tests := []struct {
+		name     string
+		reason   any
+		maxTok   int
+		wantType string
+		wantBud  int
+	}{
+		{"none", map[string]any{"effort": "none"}, 5000, "", 0},
+		{"minimal", map[string]any{"effort": "minimal"}, 5000, "enabled", 1024},
+		{"low", map[string]any{"effort": "low"}, 10000, "enabled", 2000},
+		{"medium", map[string]any{"effort": "medium"}, 10000, "enabled", 5000},
+		{"high", map[string]any{"effort": "high"}, 20000, "enabled", 10000},
+		{"default", map[string]any{}, 10000, "enabled", 7500},
+		{"nil reasoning", nil, 5000, "", 0},
+		{"small max_tokens", map[string]any{"effort": "low"}, 1024, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertReasoningConfig(tt.reason, tt.maxTok)
+			if tt.wantType == "" {
+				if got != nil {
+					t.Fatalf("convertReasoningConfig() = %v, want nil", got)
+				}
+				return
+			}
+			m, ok := got.(map[string]any)
+			if !ok {
+				t.Fatalf("convertReasoningConfig() = %T, want map", got)
+			}
+			if m["type"] != tt.wantType {
+				t.Fatalf("type = %v, want %v", m["type"], tt.wantType)
+			}
+			if m["budget_tokens"].(int) != tt.wantBud {
+				t.Fatalf("budget_tokens = %v, want %v", m["budget_tokens"], tt.wantBud)
+			}
+		})
+	}
+}
+
+func TestToAnthropicRequestConvertsStopSequences(t *testing.T) {
+	req := &types.OpenAIResponseRequest{
+		Model: "claude-sonnet-4-20250514",
+		Input: "hello",
+		Stop:  []string{"stop1", "  ", "stop2"},
+	}
+	got, err := ToAnthropicRequest(req)
+	if err != nil {
+		t.Fatalf("ToAnthropicRequest error = %v", err)
+	}
+	if len(got.StopSequences) != 2 || got.StopSequences[0] != "stop1" || got.StopSequences[1] != "stop2" {
+		t.Fatalf("StopSequences = %v, want [stop1, stop2]", got.StopSequences)
+	}
+}
+
+func TestAppendOrMergeConsecutiveUserMessages(t *testing.T) {
+	messages := []types.AnthropicMessage{
+		{Role: "user", Content: "hello"},
+	}
+	// Tool result user message should merge with previous user message
+	toolMsg := types.AnthropicMessage{
+		Role: "user",
+		Content: []types.AnthropicContentBlock{
+			{Type: "tool_result", ToolUseID: "call_1", Content: "result"},
+		},
+	}
+	result := appendOrMergeMessage(messages, toolMsg)
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1 (merged)", len(result))
+	}
+}
+
+func TestToOpenAIResponseContentFiltered(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID:         "msg_1",
+		StopReason: "content_filtered",
+		Content:    []types.AnthropicContentBlock{},
+		Usage:      types.AnthropicUsage{InputTokens: 100, OutputTokens: 50},
+	}
+	got := ToOpenAIResponse(resp, "claude-test", nil, nil)
+	if got.Status != "incomplete" || got.IncompleteDetails.Reason != "content_policy" {
+		t.Fatalf("status=%s reason=%s", got.Status, got.IncompleteDetails.Reason)
+	}
+}
+
+func TestToOpenAIResponseCacheTokens(t *testing.T) {
+	resp := &types.AnthropicMessageResponse{
+		ID:         "msg_1",
+		StopReason: "end_turn",
+		Content:    []types.AnthropicContentBlock{},
+		Usage: types.AnthropicUsage{
+			InputTokens:             100,
+			OutputTokens:           50,
+			CacheCreationInputTokens: 30,
+			CacheReadInputTokens:    20,
+		},
+	}
+	got := ToOpenAIResponse(resp, "claude-test", nil, nil)
+	if got.Usage.InputTokens != 150 {
+		t.Fatalf("InputTokens = %d, want 150", got.Usage.InputTokens)
+	}
+	if got.Usage.TotalTokens != 200 {
+		t.Fatalf("TotalTokens = %d, want 200", got.Usage.TotalTokens)
+	}
+	if got.Usage.PromptTokensDetails == nil || got.Usage.PromptTokensDetails.CachedTokens != 20 {
+		t.Fatalf("PromptTokensDetails = %v, want CachedTokens=20", got.Usage.PromptTokensDetails)
 	}
 }

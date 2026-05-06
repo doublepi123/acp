@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 // ClaudeSettings mirrors ~/.claude/settings.json
@@ -62,7 +61,7 @@ func Load() *Config {
 	}
 
 	if err := validateConfig(cfg); err != nil {
-		log.Printf("Configuration warning: %v", err)
+		log.Fatalf("Configuration error: %v", err)
 	}
 
 	return cfg
@@ -77,7 +76,9 @@ func validateConfig(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("invalid ANTHROPIC_BASE_URL %q: %w", cfg.AnthropicURL, err)
 	}
-	if u.Scheme != "https" && !strings.HasPrefix(u.Host, "localhost") && !strings.HasPrefix(u.Host, "127.0.0.1") {
+	host := u.Hostname()
+	isLocalhost := host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
+	if u.Scheme != "https" && !isLocalhost {
 		return fmt.Errorf("ANTHROPIC_BASE_URL %q does not use HTTPS; API key may be sent in cleartext", cfg.AnthropicURL)
 	}
 

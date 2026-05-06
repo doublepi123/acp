@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,7 +110,12 @@ func (h *Handler) messagesURL() string {
 
 func setAnthropicHeaders(req *http.Request, key string, anthropicReq *types.AnthropicMessageRequest) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", key)
+	// OAuth tokens (sk-ant-oat-*) use Authorization: Bearer instead of x-api-key.
+	if strings.HasPrefix(key, "sk-ant-oat-") {
+		req.Header.Set("Authorization", "Bearer "+key)
+	} else {
+		req.Header.Set("x-api-key", key)
+	}
 	req.Header.Set("anthropic-version", anthropicVersion)
 
 	var betas []string
@@ -296,6 +302,8 @@ type streamState struct {
 	stopReason      string
 	inputTokens     int
 	outputTokens    int
+	cacheCreationTokens int
+	cacheReadTokens     int
 	customTools     map[string]bool
 	applyPatchTools map[string]bool
 }
@@ -357,7 +365,11 @@ func indexValue(index *int) int {
 func (s *streamState) event(fields map[string]any) string {
 	fields["sequence_number"] = s.seq
 	s.seq++
-	b, _ := json.Marshal(fields)
+	b, err := json.Marshal(fields)
+	if err != nil {
+		log.Printf("Failed to marshal stream event: %v", err)
+		return ""
+	}
 	return string(b)
 }
 
@@ -479,6 +491,8 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		if event.Message != nil {
 			state.inputTokens = event.Message.Usage.InputTokens
 			state.outputTokens = event.Message.Usage.OutputTokens
+			state.cacheCreationTokens = event.Message.Usage.CacheCreationInputTokens
+			state.cacheReadTokens = event.Message.Usage.CacheReadInputTokens
 		}
 		resp := map[string]any{
 			"type": "response.created",
@@ -601,7 +615,7 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 				"item_id":      itemID,
 			}
 			return []string{state.event(resp), state.event(inProgress)}
-		case "web_search_tool_result", "web_search_results":
+		case "web_search_tool_result", "web_search_results", "web_fetch_tool_result":
 			toolUseID := event.ContentBlock.ToolUseID
 			searchIdx, ok := state.callIndex[toolUseID]
 			if !ok {
@@ -630,6 +644,10 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 					"item":         item,
 				}),
 			}
+		case "compaction":
+			// Compaction blocks are internal Anthropic context management;
+			// skip them in the output stream.
+			return nil
 		default:
 			// Assign an output index for unknown content block types to avoid
 			// index misalignment with subsequent blocks.
@@ -843,6 +861,9 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		case "max_tokens":
 			status = "incomplete"
 			incompleteDetails = map[string]any{"reason": "max_output_tokens"}
+		case "content_filtered", "refusal":
+			status = "incomplete"
+			incompleteDetails = map[string]any{"reason": "content_policy"}
 		}
 		resp := map[string]any{
 			"type": "response.completed",
@@ -853,9 +874,9 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 				"model":  model,
 				"output": state.output,
 				"usage": map[string]any{
-					"input_tokens":  state.inputTokens,
+					"input_tokens":  state.inputTokens + state.cacheCreationTokens + state.cacheReadTokens,
 					"output_tokens": state.outputTokens,
-					"total_tokens":  state.inputTokens + state.outputTokens,
+					"total_tokens":  state.inputTokens + state.cacheCreationTokens + state.cacheReadTokens + state.outputTokens,
 				},
 				"incomplete_details": incompleteDetails,
 			},
@@ -916,5 +937,5 @@ func (h *Handler) checkAuth(r *http.Request) bool {
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return false
 	}
-	return token == h.ProxyToken
+	return subtle.ConstantTimeCompare([]byte(token), []byte(h.ProxyToken)) == 1
 }

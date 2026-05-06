@@ -1199,3 +1199,27 @@ func TestSetAnthropicHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestSetAnthropicHeadersOAuth(t *testing.T) {
+	req := &types.AnthropicMessageRequest{}
+	httpReq, _ := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	setAnthropicHeaders(httpReq, "sk-ant-oat-12345", req)
+	if httpReq.Header.Get("x-api-key") != "" {
+		t.Fatalf("x-api-key should be empty for OAuth tokens")
+	}
+	if httpReq.Header.Get("Authorization") != "Bearer sk-ant-oat-12345" {
+		t.Fatalf("Authorization = %q, want Bearer token", httpReq.Header.Get("Authorization"))
+	}
+}
+
+func TestSetAnthropicHeadersRegularKey(t *testing.T) {
+	req := &types.AnthropicMessageRequest{}
+	httpReq, _ := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	setAnthropicHeaders(httpReq, "sk-ant-api03-12345", req)
+	if httpReq.Header.Get("x-api-key") != "sk-ant-api03-12345" {
+		t.Fatalf("x-api-key = %q, want api key", httpReq.Header.Get("x-api-key"))
+	}
+	if httpReq.Header.Get("Authorization") != "" {
+		t.Fatalf("Authorization should be empty for regular API keys")
+	}
+}

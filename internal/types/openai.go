@@ -9,6 +9,7 @@ type OpenAIResponseRequest struct {
 	Temperature   *float64       `json:"temperature,omitempty"`
 	TopP          *float64       `json:"top_p,omitempty"`
 	Stream        bool           `json:"stream,omitempty"`
+	Stop          []string       `json:"stop,omitempty"`
 	Tools         []Tool         `json:"tools,omitempty"`
 	ToolChoice    any            `json:"tool_choice,omitempty"`
 	Reasoning     any            `json:"reasoning,omitempty"`
@@ -114,9 +115,15 @@ type OutputItem struct {
 
 // Usage represents token usage.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens       int                `json:"input_tokens"`
+	OutputTokens      int                `json:"output_tokens"`
+	TotalTokens       int                `json:"total_tokens"`
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails breaks down prompt token usage.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
 // IncompleteDetails represents details about why a response is incomplete.

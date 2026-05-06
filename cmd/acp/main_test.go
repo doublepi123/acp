@@ -136,3 +136,28 @@ func TestSetEnvMany(t *testing.T) {
 		})
 	}
 }
+func TestComparePreRelease(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int // sign of result: positive means a > b
+	}{
+		{"10", "2", 1},  // 10 > 2 numerically
+		{"2", "10", -1}, // 2 < 10 numerically
+		{"5", "5", 0},
+		{"alpha", "beta", -1}, // lexicographic
+		{"3", "beta", 1},      // numeric > non-numeric
+		{"beta", "3", -1},     // non-numeric < numeric
+	}
+	for _, tt := range tests {
+		got := comparePreRelease(tt.a, tt.b)
+		sign := 0
+		if got > 0 {
+			sign = 1
+		} else if got < 0 {
+			sign = -1
+		}
+		if sign != tt.want {
+			t.Errorf("comparePreRelease(%q, %q) = %d (sign=%d), want sign=%d", tt.a, tt.b, got, sign, tt.want)
+		}
+	}
+}

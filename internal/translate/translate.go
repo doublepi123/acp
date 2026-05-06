@@ -28,6 +28,16 @@ func ToAnthropicRequest(openaiReq *types.OpenAIResponseRequest) (*types.Anthropi
 	if openaiReq.TopP != nil {
 		anthropicReq.TopP = openaiReq.TopP
 	}
+	if len(openaiReq.Stop) > 0 {
+		// Filter out whitespace-only stop sequences (Anthropic rejects them).
+		var stops []string
+		for _, s := range openaiReq.Stop {
+			if strings.TrimSpace(s) != "" {
+				stops = append(stops, s)
+			}
+		}
+		anthropicReq.StopSequences = stops
+	}
 	if thinking := convertReasoningConfig(openaiReq.Reasoning, anthropicReq.MaxTokens); thinking != nil {
 		anthropicReq.Thinking = thinking
 		anthropicReq.Temperature = nil
@@ -78,10 +88,53 @@ func convertReasoningConfig(reasoning any, maxTokens int) any {
 		return nil
 	}
 	if m, ok := reasoning.(map[string]any); ok {
-		if effort, _ := m["effort"].(string); effort == "none" {
+		effort, _ := m["effort"].(string)
+		switch effort {
+		case "none":
 			return nil
+		case "minimal":
+			budget := 1024
+			if budget > maxTokens {
+				budget = maxTokens
+			}
+			return map[string]any{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			}
+		case "low":
+			budget := min(maxTokens*1/4, 2000)
+			if budget < 1024 {
+				budget = 1024
+			}
+			return map[string]any{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			}
+		case "medium":
+			budget := min(maxTokens*3/4, 5000)
+			if budget < 1024 {
+				budget = 1024
+			}
+			return map[string]any{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			}
+		case "high":
+			budget := min(maxTokens*3/4, 10000)
+			if budget < 1024 {
+				budget = 1024
+			}
+			return map[string]any{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			}
+		}
+		// effort is empty or unrecognized — fall through to default
+		if m["type"] == "enabled" || m["budget_tokens"] != nil {
+			return reasoning
 		}
 	}
+	// Default: allocate 75% of max_tokens
 	budget := maxTokens * 3 / 4
 	if budget < 1024 {
 		budget = 1024
@@ -219,7 +272,7 @@ func convertToolChoice(tc any) any {
 				}
 				fn, ok := v["function"].(map[string]any)
 				if !ok {
-					return nil
+					return map[string]any{"type": "auto"}
 				}
 				if name, ok := fn["name"].(string); ok {
 					return map[string]any{"type": "tool", "name": name}
@@ -227,7 +280,7 @@ func convertToolChoice(tc any) any {
 			}
 		}
 	}
-	return nil
+	return map[string]any{"type": "auto"}
 }
 
 func withDisableParallelToolUse(tc any, hasTools bool) any {
@@ -364,12 +417,9 @@ func appendOrMergeMessage(messages []types.AnthropicMessage, msg types.Anthropic
 	}
 	last := &messages[len(messages)-1]
 
-	if last.Role == "assistant" && msg.Role == "assistant" {
-		last.Content = appendContentBlocks(last.Content, msg.Content)
-		return messages
-	}
-
-	if last.Role == "user" && msg.Role == "user" && hasToolResult(last.Content) {
+	// Anthropic requires alternating user/assistant roles. Merge consecutive
+	// same-role messages to prevent API errors.
+	if last.Role == msg.Role {
 		last.Content = appendContentBlocks(last.Content, msg.Content)
 		return messages
 	}
@@ -947,9 +997,11 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 					Action: webSearchAction(block.Input),
 				})
 			}
-		case "web_search_tool_result", "web_search_results":
+		case "web_search_tool_result", "web_search_results", "web_fetch_tool_result":
 			// Search result blocks are internal to Anthropic. User-visible citations
 			// are attached to subsequent text blocks and converted there.
+		case "compaction":
+			// Compaction blocks are internal Anthropic context management; skip them.
 		}
 	}
 
@@ -981,20 +1033,31 @@ func ToOpenAIResponse(anthropicResp *types.AnthropicMessageResponse, model strin
 	case "max_tokens":
 		status = "incomplete"
 		incompleteDetails = &types.IncompleteDetails{Reason: "max_output_tokens"}
+	case "content_filtered", "refusal":
+		status = "incomplete"
+		incompleteDetails = &types.IncompleteDetails{Reason: "content_policy"}
+	}
+
+	totalInput := anthropicResp.Usage.InputTokens + anthropicResp.Usage.CacheCreationInputTokens + anthropicResp.Usage.CacheReadInputTokens
+	usage := &types.Usage{
+		InputTokens:  totalInput,
+		OutputTokens: anthropicResp.Usage.OutputTokens,
+		TotalTokens:  totalInput + anthropicResp.Usage.OutputTokens,
+	}
+	if anthropicResp.Usage.CacheReadInputTokens > 0 || anthropicResp.Usage.CacheCreationInputTokens > 0 {
+		usage.PromptTokensDetails = &types.PromptTokensDetails{
+			CachedTokens: anthropicResp.Usage.CacheReadInputTokens,
+		}
 	}
 
 	return &types.OpenAIResponse{
-		ID:        anthropicResp.ID,
-		Object:    "response",
-		CreatedAt: time.Now().Unix(),
-		Status:    status,
-		Model:     model,
-		Output:    output,
-		Usage: &types.Usage{
-			InputTokens:  anthropicResp.Usage.InputTokens,
-			OutputTokens: anthropicResp.Usage.OutputTokens,
-			TotalTokens:  anthropicResp.Usage.InputTokens + anthropicResp.Usage.OutputTokens,
-		},
+		ID:               anthropicResp.ID,
+		Object:           "response",
+		CreatedAt:        time.Now().Unix(),
+		Status:           status,
+		Model:            model,
+		Output:           output,
+		Usage:            usage,
 		IncompleteDetails: incompleteDetails,
 	}
 }

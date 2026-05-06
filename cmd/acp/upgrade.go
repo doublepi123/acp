@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -412,11 +413,13 @@ func compareReleaseVersions(current, target string) (int, bool) {
 		return 1, true
 	case currentVersion.preRelease != "" && targetVersion.preRelease == "":
 		return -1, true
-	case currentVersion.preRelease > targetVersion.preRelease:
-		return 1, true
-	case currentVersion.preRelease < targetVersion.preRelease:
-		return -1, true
 	default:
+		cmp := comparePreRelease(currentVersion.preRelease, targetVersion.preRelease)
+		if cmp > 0 {
+			return 1, true
+		} else if cmp < 0 {
+			return -1, true
+		}
 		return 0, true
 	}
 }
@@ -424,6 +427,28 @@ func compareReleaseVersions(current, target string) (int, bool) {
 type releaseVersion struct {
 	numbers    []int
 	preRelease string
+}
+
+// comparePreRelease compares two pre-release strings using numeric-aware
+// ordering so that "10" > "2" (unlike lexicographic comparison where "10" < "2").
+func comparePreRelease(a, b string) int {
+	aNum, aErr := strconv.Atoi(a)
+	bNum, bErr := strconv.Atoi(b)
+	if aErr == nil && bErr == nil {
+		return aNum - bNum
+	}
+	if aErr == nil {
+		return 1 // numeric > non-numeric per SemVer
+	}
+	if bErr == nil {
+		return -1
+	}
+	if a > b {
+		return 1
+	} else if a < b {
+		return -1
+	}
+	return 0
 }
 
 func parseReleaseVersion(value string) (releaseVersion, bool) {
@@ -476,7 +501,7 @@ func latestReleaseTag(ctx context.Context, client *http.Client, baseURL, repo st
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("check latest release failed: %s", resp.Status)
 	}
 	tag := tagFromReleaseURL(resp.Request.URL)
