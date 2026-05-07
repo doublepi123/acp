@@ -61,7 +61,6 @@ func convertTool(t types.Tool) (types.AnthropicTool, toolKind, error) {
 			return types.AnthropicTool{}, toolKindFunction, fmt.Errorf("function tool missing name")
 		}
 		return types.AnthropicTool{
-			Type:        "custom",
 			Name:        name,
 			Description: description,
 			InputSchema: normalizeAnthropicInputSchema(parameters),
@@ -81,14 +80,12 @@ func convertTool(t types.Tool) (types.AnthropicTool, toolKind, error) {
 			return types.AnthropicTool{}, toolKindCustom, fmt.Errorf("custom tool missing name")
 		}
 		return types.AnthropicTool{
-			Type:        "custom",
 			Name:        name,
 			Description: customToolDescription(description, t.Format),
 			InputSchema: customToolInputSchema(),
 		}, toolKindCustom, nil
 	case "apply_patch":
 		return types.AnthropicTool{
-			Type:        "custom",
 			Name:        "apply_patch",
 			Description: applyPatchToolDescription(),
 			InputSchema: applyPatchToolInputSchema(),

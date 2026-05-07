@@ -37,11 +37,11 @@ func TestToAnthropicRequestNormalizesFunctionToolSchema(t *testing.T) {
 		t.Fatalf("len(Tools) = %d, want 2", len(got.Tools))
 	}
 	defaultSchema := got.Tools[0].InputSchema.(map[string]any)
-	if got.Tools[0].Type != "custom" || defaultSchema["type"] != "object" || defaultSchema["properties"] == nil {
+	if got.Tools[0].Type != "" || defaultSchema["type"] != "object" || defaultSchema["properties"] == nil {
 		t.Fatalf("default tool = %#v schema=%#v, want LiteLLM-style custom object schema", got.Tools[0], defaultSchema)
 	}
 	coercedSchema := got.Tools[1].InputSchema.(map[string]any)
-	if got.Tools[1].Type != "custom" || coercedSchema["type"] != "object" {
+	if got.Tools[1].Type != "" || coercedSchema["type"] != "object" {
 		t.Fatalf("coerced tool = %#v schema=%#v, want custom object schema", got.Tools[1], coercedSchema)
 	}
 	if _, ok := coercedSchema["enum"]; ok {
@@ -169,7 +169,7 @@ func TestConvertToolCustomNestedAndUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convertTool custom returned error: %v", err)
 	}
-	if kind != toolKindCustom || tool.Name != "run_freeform" || tool.Type != "custom" {
+	if kind != toolKindCustom || tool.Name != "run_freeform" || tool.Type != "" {
 		t.Fatalf("tool=%#v kind=%v, want custom run_freeform", tool, kind)
 	}
 
