@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +17,20 @@ import (
 	"strings"
 	"testing"
 )
+
+// newLocalTestServer creates an httptest server or skips the test if
+// the environment does not allow creating TCP listeners (e.g. sandbox).
+func newLocalTestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("skipping test: cannot create TCP listener: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Listener = l
+	srv.Start()
+	return srv
+}
 
 func TestReleaseAssetName(t *testing.T) {
 	tests := []struct {
@@ -353,7 +368,7 @@ func TestEnvOrDefault(t *testing.T) {
 
 func TestLatestReleaseTag(t *testing.T) {
 	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv = newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/releases/latest") {
 			http.Redirect(w, r, srv.URL+"/doublepi123/acp/releases/tag/v1.2.3", http.StatusFound)
 			return
@@ -376,7 +391,7 @@ func TestVerifyChecksum(t *testing.T) {
 	data := []byte("test binary data for checksum verification")
 	expectedHash := "8458f71efd84b697dc8028881813f1d42a08aa0634f67e311a147938054e7ae4"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
 			w.Write([]byte(expectedHash + "  acp-linux-amd64.tar.gz\n"))
 			return
@@ -427,7 +442,7 @@ func TestUpgradeExtractAndVerify(t *testing.T) {
 		t.Fatalf("gzip Close: %v", err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
 			w.Write([]byte("fakehash  acp-linux-amd64.tar.gz\n"))
 			return
@@ -587,7 +602,7 @@ func TestUpgradeFull(t *testing.T) {
 	hash := sha256.Sum256(archiveBytes)
 	checksumLine := fmt.Sprintf("%s  acp-linux-amd64.tar.gz\n", hex.EncodeToString(hash[:]))
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
 			w.Write([]byte(checksumLine))
 			return
@@ -651,7 +666,7 @@ func TestUpgradeFullWithChecksum(t *testing.T) {
 		t.Fatalf("gzip Close: %v", err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
 			w.Write([]byte("f778771739630eca76caca38535df985841650d6c6d385fa8b49dec1e5c03292  acp-linux-amd64.tar.gz\n"))
 			return
@@ -702,7 +717,7 @@ func TestUpgradeZip(t *testing.T) {
 	hash := sha256.Sum256(archiveBytes)
 	checksumLine := fmt.Sprintf("%s  acp-windows-amd64.zip\n", hex.EncodeToString(hash[:]))
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLocalTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "checksums.txt") {
 			w.Write([]byte(checksumLine))
 			return

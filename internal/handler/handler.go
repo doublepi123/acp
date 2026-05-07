@@ -656,10 +656,10 @@ func convertStreamEvent(event *types.AnthropicStreamEvent, model string, state *
 		}
 
 	case "content_block_delta":
-		if event.Delta == nil {
+		if event.Delta == nil || event.Index == nil {
 			return nil
 		}
-		idx := indexValue(event.Index)
+		idx := *event.Index
 		switch event.Delta.Type {
 		case "thinking_delta":
 			state.thinking[idx] += event.Delta.Thinking

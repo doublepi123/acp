@@ -254,7 +254,7 @@ func setEnvMany(env []string, overrides map[string]string) []string {
 	for k := range overrides {
 		prefixes = append(prefixes, k+"=")
 	}
-	filtered := env[:0]
+	filtered := make([]string, 0, len(env))
 	for _, e := range env {
 		keep := true
 		for _, p := range prefixes {

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,14 +92,10 @@ func TestCopyCodexConfigNoSource(t *testing.T) {
 }
 
 func TestCopyCodexConfigDefaultHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	// Write a config.toml in the user home .codex dir
-	codexDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte("[settings]"), 0o644); err != nil {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	// Write a config.toml in the CODEX_HOME dir
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte("[settings]"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -120,14 +114,6 @@ func TestCopyCodexConfigDefaultHome(t *testing.T) {
 }
 
 func TestWaitForReady(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"ok"}`))
-		}
-	}))
-	defer srv.Close()
-
 	// waitForReady with an invalid port should return false
 	if waitForReady(1, 50*time.Millisecond) {
 		t.Fatalf("waitForReady on port 1 should timeout")
